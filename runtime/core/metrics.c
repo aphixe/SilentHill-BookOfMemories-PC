@@ -399,6 +399,7 @@ static void maybe_tick(uint64_t now) {
 	snprintf(line_title, sizeof line_title,
 	        "vitarecomp - %.1f fps  frame %.1f/%.1f/%.1f ms  speed %.2fx  %s %u scn %u dr%s  cpu %.0f%%  win %.1f fps",
 	        fps, avg_ms, max_ms, low1_ms, speed, backend, scenes, draws, (gpu && fd) ? " (sw fallback)" : "", cpu, wfps);
+	if (getenv("RECOMP_PLAIN_TITLE")) snprintf(line_title, sizeof line_title, "%s", getenv("RECOMP_PLAIN_TITLE"));   /* (a player's window: the numbers are on F1) */
 
 	/* the overlay's own lines, in its font's upper-case + digits + ". : / - %" charset only */
 	snprintf(line_full[0], sizeof line_full[0], "FPS %.1f FRAME %.1f/%.1f/%.1f MS", fps, avg_ms, max_ms, low1_ms);

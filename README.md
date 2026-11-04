@@ -5,7 +5,7 @@ An unofficial native Windows port of the PS Vita game *Silent Hill: Book of Memo
 own machine, from your own copy of the game.
 
 **This repository contains no game files, game code or firmware, and neither do its releases.** You need your own copy of
-the game. Setup never downloads it for you.
+the game. Setup never downloads it for you. A Steam Deck and Linux build is planned.
 
 ## Status
 
@@ -30,7 +30,7 @@ Known problems:
 ## What you need
 
 - 64-bit Windows 10 or 11 and a GPU with Vulkan drivers
-- About 5 GB of free disk space
+- About 5 GB of free disk space during setup, and about 1.6 GB after
 - **Your copy of the game**: the US release, title ID `PCSE00011`, version 1.00, as a folder copied from `ux0:app/PCSE00011`
   on your Vita. Its folder holds `eboot.bin`. Other regions and versions are refused, because the port's patches are made for
   this exact build (SHA-256 of its main program:
@@ -41,25 +41,38 @@ Known problems:
 
 ## Install
 
-1. Download `SilentHillBoM-PC-<version>.zip` from the Releases page and unpack it somewhere with enough space. Or clone this
-   repository.
-2. Run `releases\Setup.bat`.
-3. Choose your firmware and game folder when asked.
-4. Wait for the build, which takes several minutes. Then use the new desktop shortcut.
+1. Download `SilentHillBoM-PC-Setup-<version>.exe` from the Releases page. It holds everything setup needs, so nothing else
+   is downloaded.
+2. Run it. Windows may warn you, because the program isn't signed.
+3. Choose an install folder, your firmware and your game folder, then press **Install**. The build takes about 8 minutes on
+   a modern PC and uses all its CPU cores.
+4. Press **PLAY**.
 
-Windows may warn about running a downloaded script, since it isn't signed. You can read
-[`releases/setup.ps1`](releases/setup.ps1) first.
+When setup finishes, you can delete the download. Setup builds the game on your PC from your own files, then removes the
+tools, the firmware and everything else it no longer needs.
 
-Setup does the following, all inside the folder you unpacked:
+## The portable folder
 
-1. Downloads the Project Nativ v0.1.5 Windows release from that project's GitHub page and checks its SHA-256. It takes only
-   Python, the compiler and SDL from it.
-2. Decrypts your firmware and game into `dump\`.
-3. Recompiles and builds the game.
-4. Adds default controls and a desktop shortcut, with an icon made from your copy's artwork.
+```text
+Silent Hill Book of Memories/
+    Silent Hill Book of Memories.exe    launcher
+    Game/                               the game and its settings
+    Saves/                              your saves, and nothing else
+    Save Backups/                       what an import replaced
+```
 
-After updating to a newer version, run `releases\Setup.bat` again. It rebuilds the game and keeps your saves and settings.
-Saves are in `dump\decrypted\PCSE00011\recomp\fs\savedata0`.
+The folder is about 1.6 GB, and all its paths are relative. Move it, rename it or copy it to another PC, and it keeps working.
+A desktop shortcut is optional, and the launcher updates it after a move.
+
+### Saves
+
+- **Syncing:** point [Syncthing](https://syncthing.net) or a similar tool at the `Saves` folder. Close the game and let the
+  sync finish before you play on another machine. Settings stay in `Game`, so each machine keeps its own.
+- **Export** writes your saves to a zip file.
+- **Import** takes a zip file or a folder. Your current saves are copied to `Save Backups` first.
+
+To update, run a newer setup program and choose the same folder. You will need your firmware and game files again. Your saves
+and settings are kept.
 
 ## Controls
 
@@ -87,20 +100,29 @@ In menus, the arrow keys move, Enter is Cross and Esc is Start.
 
 ## Building from source
 
-The commands behind setup can be run by hand from the repository's top folder, once setup has installed the tools:
+The build tools aren't in this repository. Unpack `python/`, `toolchain/`, `SDL3.dll` and `Project Nativ.exe` from the
+[Project Nativ v0.1.5 Windows release](https://github.com/TheLostPantheon/nativ/releases/tag/v0.1.5) into the repository's
+top folder. Then build the setup program, which refuses to run if a tracked file looks like game data:
 
 ```bash
-python/python.exe pipeline/vitarecomp.py build PCSE00011
+python/python.exe releases/build_app.py v0.2.0
+```
+
+The result is in `releases/out`. The program's source is in [`releases/app`](releases/app), and
+[`releases/make_portable.py`](releases/make_portable.py) lays out the portable folder.
+
+To work on the game itself, add your files and run it in place:
+
+```bash
+python/python.exe pipeline/vitarecomp.py firmware <firmware file>
+```
+
+```bash
+python/python.exe pipeline/vitarecomp.py add <game folder>
 ```
 
 ```bash
 python/python.exe pipeline/vitarecomp.py run PCSE00011
-```
-
-To build a release zip from the last commit, which also refuses to run if a tracked file looks like game data:
-
-```bash
-python/python.exe releases/build_release.py v0.1.0
 ```
 
 [`CHANGES.md`](CHANGES.md) lists what differs from Project Nativ. [`docs/NATIV-README.md`](docs/NATIV-README.md) is
@@ -108,8 +130,8 @@ Project Nativ's own README, and some of its links point to documents that are on
 [its repository](https://github.com/TheLostPantheon/nativ). The GLSL sources for the shader tables this port changed are in
 [`dev/sh-bom/shaders`](dev/sh-bom/shaders).
 
-The [`.gitignore`](.gitignore) keeps your game files, firmware, licences, generated code, builds and saves out of git, so a
-clone can be set up and played in place. Please don't commit or share any of them.
+The [`.gitignore`](.gitignore) keeps your game files, firmware, licences, generated code, builds and saves out of git. Please
+don't commit or share any of them.
 
 ## Legal
 
@@ -118,7 +140,8 @@ a trademark of Konami. Use this only with a copy of the game you own.
 
 This port is based on Project Nativ and is free software under the GNU General Public License, version 2 or (at your option)
 any later version: see [`LICENSE`](LICENSE). Third-party code keeps its own licence: see
-[`THIRD_PARTY.md`](THIRD_PARTY.md).
+[`THIRD_PARTY.md`](THIRD_PARTY.md). The setup program also carries Python and the LLVM-MinGW compiler, with their licences
+inside it.
 
 ## Credits
 

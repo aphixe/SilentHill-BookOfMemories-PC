@@ -6,7 +6,8 @@ port's work, so `git diff` from that commit shows every change. Started November
 ## Added
 
 - `packs/PCSE00011/`: the game pack for Silent Hill: Book of Memories (US, 1.00), with its code hooks
-- `releases/`: the setup program, default controls and the release builder
+- `releases/`: the setup and launcher program, default controls and the release builder
+- `third_party/imgui/backends/`: Dear ImGui's Windows and Direct3D 11 backends, unmodified, for that program
 - `dev/sh-bom/`: shader sources and the replay build script used for this port
 - `.gitignore`, `.gitattributes`, this file, and a new `README.md`. Project Nativ's is kept as `docs/NATIV-README.md`.
 
@@ -37,5 +38,6 @@ port's work, so `git diff` from that commit shows every change. Started November
 ## Kernel and files (`runtime/core/kernel.c`, `main.c`, `io.c`)
 
 - Added missing thread functions (current priority, exit thread)
+- Added `RECOMP_SAVEDATA`, which keeps saves in a folder of their own, and `RECOMP_PLAIN_TITLE` for the window title
 - Added `RECOMP_IO_OPEN_DELAY_MS`, because the game's loading code expects slower storage than a PC's
 - Added debug logging for aborts and hangs

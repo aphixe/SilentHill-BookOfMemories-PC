@@ -4,7 +4,7 @@
 # The player's library: game files, firmware, licences, generated code, builds, saves, logs
 /dump/
 
-# Installed by releases/Setup.bat from the upstream Project Nativ release
+# The build tools, unpacked from the upstream Project Nativ release
 /python/
 /toolchain/
 /SDL3.dll

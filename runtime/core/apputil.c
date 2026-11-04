@@ -70,7 +70,13 @@ static void h_is_game(Cpu *c) { RET(1); }
  * from before 2026-10-10 is empty: a slot with a blank param (the list dates it by the file). */
 #define SLOT_PARAM_SIZE 0x34c
 static const char *fs_root(void) { return getenv("RECOMP_FS") ? getenv("RECOMP_FS") : "fs"; }
-static void slot_marker(uint32_t id, char *buf, size_t n) { snprintf(buf, n, "%s/savedata0/.slot%u", fs_root(), id); }
+/* the host folder of savedata0: (RECOMP_SAVEDATA: a folder of its own, so a portable install keeps saves apart from the game) */
+const char *savedata_dir(void) {
+	static char d[1024];
+	if (!d[0]) { const char *e = getenv("RECOMP_SAVEDATA"); if (e && *e) snprintf(d, sizeof d, "%s", e); else snprintf(d, sizeof d, "%s/savedata0", fs_root()); }
+	return d;
+}
+static void slot_marker(uint32_t id, char *buf, size_t n) { snprintf(buf, n, "%s/.slot%u", savedata_dir(), id); }
 static int slot_read(uint32_t id, uint8_t *p) {   /* the slot's param into p (zeros past what the file holds); 0: no such slot */
 	char m[1024]; slot_marker(id, m, sizeof m);
 	memset(p, 0, SLOT_PARAM_SIZE);
@@ -84,7 +90,7 @@ static int slot_write(uint32_t id, uint32_t param) {   /* param: a guest SceAppU
 	time_t now = time(0); struct tm tm; localtime_r(&now, &tm);
 	uint16_t dt[6] = {(uint16_t)(tm.tm_year + 1900), (uint16_t)(tm.tm_mon + 1), (uint16_t)tm.tm_mday, (uint16_t)tm.tm_hour, (uint16_t)tm.tm_min, (uint16_t)tm.tm_sec};
 	memcpy(p + 0x30c, dt, sizeof dt); memset(p + 0x318, 0, 4);
-	char dir[1024]; snprintf(dir, sizeof dir, "%s/savedata0", fs_root()); mkdir(dir, 0755);
+	char dir[1024]; snprintf(dir, sizeof dir, "%s", savedata_dir()); mkdir(dir, 0755);
 	char m[1024]; slot_marker(id, m, sizeof m);
 	FILE *f = fopen(m, "wb"); if (!f) return -1;
 	fwrite(p, 1, SLOT_PARAM_SIZE, f); fclose(f);
@@ -102,7 +108,7 @@ static void h_save_slot_set_param(Cpu *c) { RET(slot_write(A0, A1) == 0 ? 0 : 0x
 /* (SceAppUtilSaveDataFileSlot * (id +0, slotParam +4), SceAppUtilSaveDataFile[], count, mount point, *required KB)
  * file: path +0, buf +4, size +8, offset +16 (64-bit), mode +24; 64 bytes each */
 static void h_save_data_save(Cpu *c) {
-	char dir[1024]; snprintf(dir, sizeof dir, "%s/savedata0", fs_root()); mkdir(dir, 0755);
+	char dir[1024]; snprintf(dir, sizeof dir, "%s", savedata_dir()); mkdir(dir, 0755);
 	for (uint32_t i = 0; i < A2; i++) {
 		uint32_t f = A1 + 64 * i, path = RD32(f), buf = RD32(f + 4), size = RD32(f + 8), mode = RD32(f + 24);
 		uint64_t off = RD64(f + 16);
@@ -124,7 +130,7 @@ static void h_save_data_save(Cpu *c) {
 }
 static void h_save_data_remove(Cpu *c) {   /* (slot, SceAppUtilSaveDataRemoveItem[] (44 bytes: path +0), count, mount) */
 	for (uint32_t i = 0; i < A2; i++) {
-		char hp[1024]; snprintf(hp, sizeof hp, "%s/savedata0/%s", fs_root(), (char *)G(RD32(A1 + 0x2c * i)));
+		char hp[1024]; snprintf(hp, sizeof hp, "%s/%s", savedata_dir(), (char *)G(RD32(A1 + 0x2c * i)));
 		for (char *q = hp + strlen(fs_root()); *q; q++) if (*q == '\\') *q = '/';
 		unlink(hp);
 	}
@@ -445,7 +451,7 @@ static void open_psid(uint8_t id[16]) {
 	int ok = strlen(b) == 32;
 	for (int i = 0; ok && i < 16; i++) { unsigned v; ok = sscanf(b + 2 * i, "%2x", &v) == 1; cur[i] = (uint8_t)v; }
 	if (!ok) {
-		char dir[1024]; snprintf(dir, sizeof dir, "%s/savedata0", fs_root());
+		char dir[1024]; snprintf(dir, sizeof dir, "%s", savedata_dir());
 		int saves = 0;
 		DIR *d = opendir(dir);
 		if (d) { struct dirent *e; while ((e = readdir(d))) saves |= e->d_name[0] != '.'; closedir(d); }

@@ -52,6 +52,14 @@ static const char *host_path_s(const char *p, char *buf, size_t n) {
 	const char *colon = strchr(p, ':'), *slash = strchr(p, '/');
 	if (colon && (!slash || colon < slash)) {
 		const char *rest = colon + 1; while (*rest == '/') rest++;
+		/* (savedata0: may be a folder of its own, apputil.c) */
+		if (getenv("RECOMP_SAVEDATA") && colon - p == 9 && !strncmp(p, "savedata0", 9)) {
+			extern const char *savedata_dir(void); const char *sd = savedata_dir();
+			snprintf(buf, n, "%s/%s", sd, rest);
+			for (char *q = buf + strlen(sd); *q; q++) if (*q == '\\') *q = '/';
+			host_path_fold(buf, strlen(sd));
+			return buf;
+		}
 		snprintf(buf, n, "%s/%.*s/%s", root, (int)(colon - p), p, rest);
 	} else snprintf(buf, n, "%s/%s", root, p);
 	for (char *q = buf + strlen(root); *q; q++) if (*q == '\\') *q = '/';   /* a separator on the console (exFAT forbids it in names): Uncharted saves "slot_000/saves\checkpoint.bin" */
