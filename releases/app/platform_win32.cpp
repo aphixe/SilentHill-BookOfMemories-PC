@@ -253,6 +253,30 @@ void desktop_shortcut_refresh(const std::string &target) {
 }
 
 // ---- the player's own icon, written into their copy of the launcher: game art never ships in a release
+bool can_add_to_steam() { return false; }
+bool add_to_steam(const std::string &) { return false; }
+ToolPaths tool_paths(const std::string &work) {
+	fs::path w = fs::u8path(work);
+	const char *root = getenv("SystemRoot");
+	std::string sys = root ? root : "C:\\Windows";
+	return {(w / "python" / "python.exe").u8string(), (w / "python").u8string() + ";" + sys + "\\System32;" + sys, "x86-64-v2"};
+}
+bool install_launcher(const std::string &dest, uint64_t program_size) {
+	std::ifstream in(fs::u8path(exe_path()), std::ios::binary);
+	std::ofstream out(fs::u8path(dest), std::ios::binary);
+	std::vector<char> buf(1 << 20);
+	for (uint64_t left = program_size; left && in;) {
+		size_t n = (size_t)std::min<uint64_t>(left, buf.size());
+		in.read(buf.data(), n);
+		out.write(buf.data(), n);
+		left -= n;
+	}
+	return in && out;
+}
+void finish_file(const std::string &, int) {}
+std::vector<std::string> font_paths() { return {"C:\\Windows\\Fonts\\segoeui.ttf", "C:\\Windows\\Fonts\\seguisb.ttf"}; }
+bool has_file_dialogs() { return true; }
+bool replace_with_game(const std::string &, const std::vector<std::string> &, const std::string &, const Env &) { return false; }
 bool set_exe_icon(const std::string &exe, const std::string &png_path) {
 	std::ifstream in(fs::u8path(png_path), std::ios::binary);
 	std::vector<char> png((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());

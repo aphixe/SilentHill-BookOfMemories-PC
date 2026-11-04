@@ -374,7 +374,7 @@ void recomp_call_external(Cpu *c, uint32_t addr) {
 			f(c);
 			if ((fl & RF_GXM) && log_gxm()) {
 				{ char tn[32] = ""; plat_thread_name(tn, sizeof tn); if (!strcmp(name, "sceGxmBeginScene") || !strcmp(name, "sceGxmEndScene") || c->r[0] >> 16 == 0x805b) fprintf(stderr, "scene [%s] %s -> %x lr %x\n", tn, name, c->r[0], lr0); }
-				fprintf(stderr, "gxm [%u] %-44s %08x %08x %08x %08x -> %08x lr %08x (Sony)\n", (unsigned)GetCurrentThreadId(), name, a0, a1, a2, a3, c->r[0], lr0); }
+				fprintf(stderr, "gxm [%u] %-44s %08x %08x %08x %08x -> %08x lr %08x (Sony)\n", (unsigned)(uintptr_t)c, name, a0, a1, a2, a3, c->r[0], lr0); }
 			{   /* RECOMP_TRACE_MODULE=<prefix>[,...]: calls to a loaded module's exports by those names, with the first
 			     * four arguments and the result (RECOMP_LOG_IMPORTS sees only the host's) */
 				static const char *tr; static int tr_init; if (!tr_init) { tr = getenv("RECOMP_TRACE_MODULE"); tr_init = 1; }

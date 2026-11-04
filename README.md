@@ -1,15 +1,15 @@
 # Silent Hill: Book of Memories for PC
 
-An unofficial native Windows port of the PS Vita game *Silent Hill: Book of Memories*, built with
-[Project Nativ](https://github.com/TheLostPantheon/nativ). The game's code is recompiled into a Windows program on your
-own machine, from your own copy of the game.
+An unofficial native port of the PS Vita game *Silent Hill: Book of Memories*, for Windows and Linux, including the Steam Deck, built with
+[Project Nativ](https://github.com/TheLostPantheon/nativ). The game's code is recompiled into a native program on your own
+machine, from your own copy of the game.
 
 **This repository contains no game files, game code or firmware, and neither do its releases.** You need your own copy of
-the game. Setup never downloads it for you. A Steam Deck and Linux build is planned.
+the game. Setup never downloads it for you.
 
 ## Status
 
-This is an early port, tested on one Windows PC. The game runs from the menus into gameplay, with sound, saves, controller
+This is an early port. Windows is tested on one PC. Linux has run only in a test setup, not yet on a real Steam Deck. The game runs from the menus into gameplay, with sound, saves, controller
 support and keyboard and mouse controls. Expect bugs and possible crashes, and keep a copy of your saves.
 
 | Works | Details |
@@ -29,7 +29,7 @@ Known problems:
 
 ## What you need
 
-- 64-bit Windows 10 or 11 and a GPU with Vulkan drivers
+- 64-bit Windows 10 or 11, or 64-bit Linux such as SteamOS, and a GPU with Vulkan drivers
 - About 5 GB of free disk space during setup, and about 1.6 GB after
 - **Your copy of the game**: the US release, title ID `PCSE00011`, version 1.00, as a folder copied from `ux0:app/PCSE00011`
   on your Vita. Its folder holds `eboot.bin`. Other regions and versions are refused, because the port's patches are made for
@@ -51,17 +51,30 @@ Known problems:
 When setup finishes, you can delete the download. Setup builds the game on your PC from your own files, then removes the
 tools, the firmware and everything else it no longer needs.
 
+## Install on a Steam Deck
+
+1. Switch to Desktop Mode, and copy your firmware file and game folder onto the Deck.
+2. Download `SilentHillBoM-Linux-Setup-<version>` from the Releases page.
+3. Right-click the file, open **Properties > Permissions**, and turn on **Is executable**.
+4. Run it, choose your folders and press **Install**. Keep the Deck plugged in, because the build uses all its CPU cores.
+5. Press **Add to Steam** in the launcher. You can then start the game from your library in Gaming Mode, where the launcher
+   works with the Deck's controls.
+
+The same file works on other 64-bit Linux systems. File pickers need `kdialog` or `zenity`, and otherwise you can type the
+paths. Saves work on both systems, so one Syncthing folder can keep a Windows PC and a Deck in step.
+
 ## The portable folder
 
 ```text
 Silent Hill Book of Memories/
-    Silent Hill Book of Memories.exe    launcher
+    Silent Hill Book of Memories        launcher (.exe on Windows)
     Game/                               the game and its settings
     Saves/                              your saves, and nothing else
     Save Backups/                       what an import replaced
 ```
 
-The folder is about 1.6 GB, and all its paths are relative. Move it, rename it or copy it to another PC, and it keeps working.
+The folder is about 1.6 GB, and all its paths are relative. Move it, rename it or copy it to another PC with the same operating
+system, and it keeps working. On Linux, `--play` skips the launcher and goes straight into the game.
 A desktop shortcut is optional, and the launcher updates it after a move.
 
 ### Saves
@@ -108,7 +121,8 @@ top folder. Then build the setup program, which refuses to run if a tracked file
 python/python.exe releases/build_app.py v0.2.0
 ```
 
-The result is in `releases/out`. The program's source is in [`releases/app`](releases/app), and
+On Linux, use the `python/` and `toolchain/` from Project Nativ's AppImage instead, and run `python/bin/python3` in place of
+`python/python.exe`. The result is in `releases/out`. The program's source is in [`releases/app`](releases/app), and
 [`releases/make_portable.py`](releases/make_portable.py) lays out the portable folder.
 
 To work on the game itself, add your files and run it in place:

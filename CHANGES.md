@@ -7,7 +7,7 @@ port's work, so `git diff` from that commit shows every change. Started November
 
 - `packs/PCSE00011/`: the game pack for Silent Hill: Book of Memories (US, 1.00), with its code hooks
 - `releases/`: the setup and launcher program, default controls and the release builder
-- `third_party/imgui/backends/`: Dear ImGui's Windows and Direct3D 11 backends, unmodified, for that program
+- `third_party/imgui/backends/`: Dear ImGui's Windows, Direct3D 11 and SDL renderer backends, unmodified, for that program
 - `dev/sh-bom/`: shader sources and the replay build script used for this port
 - `.gitignore`, `.gitattributes`, this file, and a new `README.md`. Project Nativ's is kept as `docs/NATIV-README.md`.
 

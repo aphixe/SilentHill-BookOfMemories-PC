@@ -31,6 +31,19 @@ bool desktop_shortcut_exists();
 bool desktop_shortcut_make(const std::string &target);
 void desktop_shortcut_refresh(const std::string &target);   // follows a moved folder: only a shortcut already pointing at an exe of this name
 bool set_exe_icon(const std::string &exe, const std::string &png_path);
+bool can_add_to_steam();
+bool add_to_steam(const std::string &target);
+
+// Where the unpacked tools are, and what the tools' PATH should be
+struct ToolPaths { std::string python, path, cpu; };   // cpu: the build's target, in this compiler's spelling
+ToolPaths tool_paths(const std::string &work);
+// The launcher in the portable folder: this program without its payload
+bool install_launcher(const std::string &dest, uint64_t program_size);
+void finish_file(const std::string &path, int mode);   // mode 1: a program
+std::vector<std::string> font_paths();                 // regular, bold, and so on: the first pair that exists
+bool has_file_dialogs();
+// Become the game, with no window of ours: false if this platform doesn't, or it failed
+bool replace_with_game(const std::string &exe, const std::vector<std::string> &args, const std::string &cwd, const Env &env);
 
 void *load_texture(const std::string &path, int *w, int *h);
 void window_minimize();

@@ -3,7 +3,11 @@
   -> releases/out/SilentHillBoM-PC-Setup-<version>.exe and its .sha256
 
 The exe is the app (releases/app) with a payload after it: this repository's tracked files, Python and the compiler. It holds no game
-files, firmware or licences, and refuses to build if a tracked file looks like one. --no-payload: the app alone, for working on the window."""
+files, firmware or licences, and refuses to build if a tracked file looks like one. --no-payload: the app alone, for working on the window.
+
+On Linux this makes SilentHillBoM-Linux-Setup-<version>, laid out as:
+    [static stub_linux][app][libSDL3.so.0][payload][parts table][footer]
+Run it from a repository with the Linux python/ and toolchain/ from Project Nativ's AppImage."""
 import hashlib, os, struct, subprocess, sys, zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -17,6 +21,7 @@ OBJ = os.path.join(OUT, "app_obj")
 TC = os.path.join(ROOT, "toolchain")
 BIN = os.path.join(TC, "llvm-mingw", "bin")
 CXX = os.path.join(BIN, "x86_64-w64-mingw32-clang++.exe")
+LINUX = os.name != "nt"
 IM = os.path.join(ROOT, "third_party", "imgui")
 
 # what building for x86-64 Windows never touches: the compiler's other targets and its own Python
@@ -79,16 +84,37 @@ def build_program(version, out):
     subprocess.run([CXX, "-municode", "-mwindows", "-static", "-s", "-o", out] + objs + libs, check=True, env=env)
 
 
+def build_linux_parts(version):
+    """the stub, and the app built against the toolchain's SDL; the app looks for SDL beside itself, then in Game/"""
+    os.makedirs(OBJ, exist_ok=True)
+    cxx, sdl = os.path.join(TC, "bin", "c++"), os.path.join(TC, "SDL3")
+    flags = ["-O2", "-std=c++17", "-w", "-I", IM, "-I", os.path.join(IM, "backends"), "-I", os.path.join(ROOT, "third_party", "stb"), "-I", APP,
+             "-I", os.path.join(TC, "zlib", "include"), "-I", os.path.join(sdl, "include"), "-DAPP_VERSION=\"%s\"" % version]
+    objs = []
+    for s in [os.path.join(IM, n) for n in ("imgui.cpp", "imgui_draw.cpp", "imgui_tables.cpp", "imgui_widgets.cpp")] + \
+             [os.path.join(IM, "backends", n) for n in ("imgui_impl_sdl3.cpp", "imgui_impl_sdlrenderer3.cpp")] + [os.path.join(APP, n) for n in ("app.cpp", "platform_linux.cpp")]:
+        o = os.path.join(OBJ, os.path.basename(s) + ".o")
+        objs.append(o)
+        if s.startswith(APP) or not os.path.isfile(o) or os.path.getmtime(s) > os.path.getmtime(o):
+            print("  c++", os.path.basename(s))
+            subprocess.run([cxx, "-c"] + flags + [s, "-o", o], check=True)
+    app = os.path.join(OBJ, "shbom-app")
+    subprocess.run([cxx, "-s", "-o", app] + objs + [os.path.join(TC, "zlib", "lib", "libz.a"), "-L", os.path.join(sdl, "lib"), "-lSDL3", "-Wl,-rpath,$ORIGIN:$ORIGIN/Game", "-lpthread"], check=True)
+    stub = os.path.join(OBJ, "stub")
+    subprocess.run([os.path.join(TC, "zig", "zig"), "cc", "-target", "x86_64-linux-musl", "-static", "-Os", "-s", "-o", stub, os.path.join(APP, "stub_linux.c")], check=True)
+    return stub, app, os.path.join(sdl, "lib", "libSDL3.so.0")
+
+
 def payload_files():
     files = [f.decode() for f in subprocess.run(["git", "-C", ROOT, "ls-files", "-z"], check=True, capture_output=True).stdout.split(b"\0") if f]
     for top in ("python", "toolchain"):
-        for d, _, names in os.walk(os.path.join(ROOT, top)):
+        for d, dirs, names in os.walk(os.path.join(ROOT, top)):
             if os.path.basename(d) == "__pycache__": continue
-            files += [os.path.relpath(os.path.join(d, n), ROOT).replace("\\", "/") for n in names]
-    return sorted(f for f in set(files) if not f.startswith(SKIP) and os.path.isfile(os.path.join(ROOT, f)))
+            files += [os.path.relpath(os.path.join(d, n), ROOT).replace("\\", "/") for n in names + [x for x in dirs if os.path.islink(os.path.join(d, x))]]
+    return sorted(f for f in set(files) if not f.startswith(SKIP) and os.path.lexists(os.path.join(ROOT, f)))
 
 
-def append_payload(path, version):
+def append_payload(path, version, parts=b""):
     bad = build_release.check()
     if bad: sys.exit("Refusing to build: these tracked files look like game data:\n  " + "\n  ".join(bad))
     files = payload_files()
@@ -98,11 +124,15 @@ def append_payload(path, version):
         total = 0
         for i, f in enumerate(files):
             # (version.txt: what the tools report, since a player has no git)
-            with open(os.path.join(ROOT, f), "rb") as src: raw = version.encode() + b"\n" if f == "version.txt" else src.read()
+            full, mode = os.path.join(ROOT, f), 0
+            if os.path.islink(full): raw, mode = os.readlink(full).encode(), 2
+            else:
+                with open(full, "rb") as src: raw = version.encode() + b"\n" if f == "version.txt" else src.read()
+                if LINUX and os.access(full, os.X_OK): mode = 1
             co = zlib.compressobj(9, zlib.DEFLATED, -15)
             c = co.compress(raw) + co.flush()
             name = f.encode("utf-8")
-            index += struct.pack("<H", len(name)) + name + struct.pack("<QQQ", out.tell(), len(c), len(raw))
+            index += struct.pack("<H", len(name)) + name + struct.pack("<QQQB", out.tell(), len(c), len(raw), mode)
             out.write(c)
             total += len(raw)
             if i % 2000 == 0: print(f"  {i}/{len(files)} files")
@@ -110,17 +140,31 @@ def append_payload(path, version):
         ci = co.compress(bytes(index)) + co.flush()
         index_off = out.tell()
         out.write(ci)
+        out.write(parts)
         out.write(b"SHBMPAK1" + struct.pack("<QQQQ", data_off, index_off, len(ci), len(index)))
     print(f"  payload: {len(files)} files, {total / 1048576:.0f} MB unpacked")
 
 
 def main():
     version = sys.argv[1] if len(sys.argv) > 1 else "dev"
-    out = os.path.join(OUT, f"SilentHillBoM-PC-Setup-{version}.exe")
+    out = os.path.join(OUT, f"SilentHillBoM-Linux-Setup-{version}" if LINUX else f"SilentHillBoM-PC-Setup-{version}.exe")
     os.makedirs(OUT, exist_ok=True)
-    build_program(version, out)
-    print(f"  program: {os.path.getsize(out) / 1048576:.1f} MB")
-    if "--no-payload" not in sys.argv: append_payload(out, version)
+    if LINUX:
+        stub, app, sdl = build_linux_parts(version)
+        if "--no-payload" in sys.argv: return
+        with open(out, "wb") as f:
+            table = b"SHBMPART"
+            for part in (stub, app, sdl):
+                off = f.tell()
+                with open(part, "rb") as src: f.write(src.read())
+                if part != stub: table += struct.pack("<QQ", off, f.tell() - off)
+        os.chmod(out, 0o755)
+        print(f"  program: {os.path.getsize(out) / 1048576:.1f} MB")
+        append_payload(out, version, table)
+    else:
+        build_program(version, out)
+        print(f"  program: {os.path.getsize(out) / 1048576:.1f} MB")
+        if "--no-payload" not in sys.argv: append_payload(out, version)
     h = hashlib.sha256()
     with open(out, "rb") as f:
         for b in iter(lambda: f.read(1 << 20), b""): h.update(b)

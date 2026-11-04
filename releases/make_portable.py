@@ -19,7 +19,8 @@ os.makedirs(game, exist_ok=True)
 os.makedirs(saves, exist_ok=True)
 
 # the program and what it loads
-for f in [g.EXE, "SDL3.dll", g.BASE + ".img"] + [m + ".img" for m in g.MODS]:
+sdl = "SDL3.dll" if os.name == "nt" else "libSDL3.so.0"
+for f in [g.EXE, sdl, g.BASE + ".img"] + [m + ".img" for m in g.MODS]:
     shutil.copy2(os.path.join(g.OUT, f), os.path.join(game, f))
 
 # the game's data: a real folder now, not a link to the library. (moved, not copied: a move on one drive takes no time)
@@ -31,7 +32,11 @@ shutil.move(os.path.join(g.W, "app0"), old)
 
 # controls and the like. Kept on update. Not in Saves: a PC and a Steam Deck want different settings.
 settings = os.path.join(game, "settings.ini")
-if not os.path.isfile(settings): shutil.copy2(os.path.join(HERE, "default-settings.ini"), settings)
+if not os.path.isfile(settings):
+    shutil.copy2(os.path.join(HERE, "default-settings.ini"), settings)
+    # (a Steam Deck plays on its own screen, and has no easy Alt+Enter)
+    if os.environ.get("SteamDeck") == "1" or "steamos" in (open("/etc/os-release").read().lower() if os.path.isfile("/etc/os-release") else ""):
+        with open(settings, "a", encoding="utf-8", newline="\n") as f: f.write("fullscreen = 1\n")
 
 # how to start it, for the launcher: everything relative to Game
 shipped = os.path.join(vitarecomp.PACKS, g.PACK, "shaders.txt")

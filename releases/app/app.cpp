@@ -30,7 +30,11 @@ extern const char *const APP_TITLE = "Silent Hill: Book of Memories";
 #define APP_VERSION "dev"
 #endif
 static const char *const TITLE_ID = "PCSE00011";
+#ifdef _WIN32
 static const char *const LAUNCHER_NAME = "Silent Hill Book of Memories.exe";
+#else
+static const char *const LAUNCHER_NAME = "Silent Hill Book of Memories";
+#endif
 static const char *const DEFAULT_FOLDER = "Silent Hill Book of Memories";
 static const char *const REPO_URL = "https://github.com/aphixe/SilentHill-BookOfMemories-PC";
 static const uint64_t NEEDED_BYTES = 5ull << 30;
@@ -40,7 +44,7 @@ static std::string S(const fs::path &p) { return p.u8string(); }
 
 // ---- payload: [program][deflated files][deflated index][footer]
 struct Footer { char magic[8]; uint64_t data_off, index_off, index_csize, index_usize; };
-struct Entry { std::string path; uint64_t off, csize, usize; };
+struct Entry { std::string path; uint64_t off, csize, usize; uint8_t mode; };   // mode: 0 a file, 1 a program, 2 a symbolic link, whose target is its content
 static const char PAYLOAD_MAGIC[8] = {'S', 'H', 'B', 'M', 'P', 'A', 'K', '1'};
 
 static bool inflate_raw(const void *in, size_t in_n, void *out, size_t out_n) {
@@ -69,7 +73,7 @@ static bool read_index(const std::string &exe, const Footer &f, std::vector<Entr
 		uint16_t n; memcpy(&n, &u[i], 2); i += 2;
 		Entry e;
 		e.path.assign(&u[i], n); i += n;
-		memcpy(&e.off, &u[i], 8); memcpy(&e.csize, &u[i + 8], 8); memcpy(&e.usize, &u[i + 16], 8); i += 24;
+		memcpy(&e.off, &u[i], 8); memcpy(&e.csize, &u[i + 8], 8); memcpy(&e.usize, &u[i + 16], 8); e.mode = (uint8_t)u[i + 24]; i += 25;
 		out->push_back(std::move(e));
 	}
 	return true;
@@ -344,10 +348,17 @@ static bool unpack(Job &j, const std::string &exe, const Footer &f, const fs::pa
 			in.seekg((std::streamoff)e.off);
 			in.read(c.data(), c.size());
 			bool ok = (bool)in && (e.usize == 0 || inflate_raw(c.data(), c.size(), u.data(), u.size()));
-			if (ok) {
-				std::ofstream o(dir / P(e.path), std::ios::binary);
-				o.write(u.data(), u.size());
-				ok = (bool)o;
+			if (ok && e.mode == 2) {
+				std::error_code lec;
+				fs::create_symlink(fs::path(std::string(u.begin(), u.end())), dir / P(e.path), lec);
+				ok = !lec;
+			} else if (ok) {
+				{
+					std::ofstream o(dir / P(e.path), std::ios::binary);
+					o.write(u.data(), u.size());
+					ok = (bool)o;
+				}
+				if (e.mode) plat::finish_file(S(dir / P(e.path)), e.mode);
 			}
 			if (!ok) { std::lock_guard<std::mutex> g(bad_m); bad_file = e.path; bad = true; }
 			if (i % 64 == 0) j.part = (float)i / entries.size();
@@ -366,16 +377,16 @@ static void install_thread(Job *jp, Footer f) {
 	fs::create_directories(j.target, ec);
 	if (ec) { j.fail("Could not create " + S(j.target) + ": " + ec.message()); return; }
 	std::string exe = plat::exe_path();
-	fs::path work = j.target / "_setup", python = work / "python" / "python.exe";
+	fs::path work = j.target / "_setup";
 	j.step = S_UNPACK;
 	if (!unpack(j, exe, f, work)) return;
 	fs::create_directories(work / "dump", ec);   // (the tools use <folder>/dump only if it exists)
 
 	// (nothing of this PC's own Python or compilers can get in the way)
-	std::string sys = getenv("SystemRoot") ? getenv("SystemRoot") : "C:\\Windows";
-	plat::Env env = {{"PATH", S(work / "python") + ";" + sys + "\\System32;" + sys}, {"PYTHONHOME", ""}, {"PYTHONPATH", ""}, {"PYTHONUNBUFFERED", "1"}, {"PYTHONUTF8", "1"}, {"PYTHONDONTWRITEBYTECODE", "1"},
-	                 {"RECOMP_CPU", "x86-64-v2"}};   // (not this PC's own processor: the folder has to run on the next PC)
-	std::string py = S(python), driver = S(work / "pipeline" / "vitarecomp.py");
+	plat::ToolPaths tools = plat::tool_paths(S(work));
+	plat::Env env = {{"PATH", tools.path}, {"PYTHONHOME", ""}, {"PYTHONPATH", ""}, {"PYTHONUNBUFFERED", "1"}, {"PYTHONUTF8", "1"}, {"PYTHONDONTWRITEBYTECODE", "1"},
+	                 {"RECOMP_CPU", tools.cpu}};   // (not this PC's own processor: the folder has to run on the next PC)
+	std::string py = tools.python, driver = S(work / "pipeline" / "vitarecomp.py");
 	int compiled = 0;
 	auto tool = [&](std::vector<std::string> argv, const char *what) {
 		if (j.cancelled) return false;
@@ -407,18 +418,7 @@ static void install_thread(Job *jp, Footer f) {
 
 	// the launcher: this program without the payload, with the icon from the player's own copy
 	fs::path launcher = j.target / P(LAUNCHER_NAME);
-	{
-		std::ifstream in(P(exe), std::ios::binary);
-		std::ofstream out(launcher, std::ios::binary);
-		std::vector<char> buf(1 << 20);
-		for (uint64_t left = f.data_off; left && in; ) {
-			size_t n = (size_t)std::min<uint64_t>(left, buf.size());
-			in.read(buf.data(), n);
-			out.write(buf.data(), n);
-			left -= n;
-		}
-		if (!in || !out) { j.fail("Could not write " + S(launcher)); return; }
-	}
+	if (!plat::install_launcher(S(launcher), f.data_off)) { j.fail("Could not write " + S(launcher)); return; }
 	fs::path icon = j.target / "Game" / "fs" / "app0" / "sce_sys" / "icon0.png";
 	if (!plat::set_exe_icon(S(launcher), S(icon))) j.say("(the launcher keeps the plain icon)");
 	if (j.shortcut && !plat::desktop_shortcut_make(S(launcher))) j.say("(could not make the desktop shortcut)");
@@ -439,11 +439,9 @@ static void start_install(const fs::path &target, const std::string &firmware, c
 
 // ---- launching
 static plat::Game *g_game;
-static bool play(const fs::path &root, std::string *err) {
+static std::string read_launch(const fs::path &root, std::vector<std::string> &args, plat::Env &env) {
 	std::ifstream in(root / "Game" / "launch.cfg");
 	std::string line, exe;
-	std::vector<std::string> args;
-	plat::Env env;
 	while (std::getline(in, line)) {
 		if (line.rfind("exe=", 0) == 0) exe = line.substr(4);
 		else if (line.rfind("arg=", 0) == 0) args.push_back(line.substr(4));
@@ -452,6 +450,12 @@ static bool play(const fs::path &root, std::string *err) {
 			if (eq != std::string::npos) env.push_back({line.substr(4, eq - 4), line.substr(eq + 1)});
 		}
 	}
+	return exe;
+}
+static bool play(const fs::path &root, std::string *err) {
+	std::vector<std::string> args;
+	plat::Env env;
+	std::string exe = read_launch(root, args, env);
 	if (exe.empty()) { *err = "The Game folder is incomplete. Run setup again."; return false; }
 	std::error_code ec;
 	fs::create_directories(root / "Saves", ec);
@@ -487,6 +491,16 @@ int app_command_line(int argc, char **argv) {
 	std::string msg;
 	if (!export_to.empty()) return zip_folder(P(root) / "Saves", P(export_to), &msg) ? 0 : 1;
 	if (!import_from.empty()) return import_saves(P(root), P(import_from), &msg) ? 0 : 1;
+	if (g_auto_play && installed_at(P(root))) {
+		// (where the platform can, straight into the game with no window of ours: what a Steam entry wants)
+		std::vector<std::string> args;
+		plat::Env env;
+		std::string exe = read_launch(P(root), args, env);
+		fs::path game = P(root) / "Game";
+		std::error_code ec;
+		fs::create_directories(P(root) / "Saves", ec);
+		if (!exe.empty()) plat::replace_with_game(S(game / exe), args, S(game), env);
+	}
 	if (install) {
 		Footer f;
 		if (!read_footer(exe, &f) || !check_firmware(firmware).ok || !check_game(game).ok || target.empty()) return 2;
@@ -518,6 +532,7 @@ static bool g_art_tried;
 static std::string g_saves_info;
 static double g_saves_checked = -100;
 static bool g_finished_banner;
+static bool g_play_focused;
 
 static void set_status(const std::string &s, bool bad = false) { g_status = s; g_status_bad = bad; }
 
@@ -558,13 +573,17 @@ void app_set_scale(float s) {
 }
 void app_init() {
 	ImGuiIO &io = ImGui::GetIO();
-	const char *regular = "C:\\Windows\\Fonts\\segoeui.ttf", *bold = "C:\\Windows\\Fonts\\seguisb.ttf";
 	std::error_code ec;
 	ImFontConfig cfg;
-	if (fs::exists(regular, ec)) {
-		io.Fonts->AddFontFromFileTTF(regular, 17, &cfg);
-		g_font_bold = fs::exists(bold, ec) ? io.Fonts->AddFontFromFileTTF(bold, 17, &cfg) : 0;
-	} else io.Fonts->AddFontDefault();
+	auto fonts = plat::font_paths();
+	bool loaded = false;
+	for (size_t i = 0; i + 1 < fonts.size() && !loaded; i += 2) {
+		if (!fs::exists(fonts[i], ec)) continue;
+		loaded = io.Fonts->AddFontFromFileTTF(fonts[i].c_str(), 17, &cfg) != 0;
+		if (loaded && fs::exists(fonts[i + 1], ec)) g_font_bold = io.Fonts->AddFontFromFileTTF(fonts[i + 1].c_str(), 17, &cfg);
+	}
+	if (!loaded) io.Fonts->AddFontDefault();
+	io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad | ImGuiConfigFlags_NavEnableKeyboard;   // (a Steam Deck in Gaming Mode has only its controls)
 	ImGui::GetStyle().FontSizeBase = 17;
 	g_font_big = g_font_bold;
 
@@ -732,7 +751,8 @@ static void page_setup() {
 		snprintf(b, sizeof b, "That drive has %.1f GB free. Setup needs about 5 GB while it runs.", have / 1073741824.0);
 		dot_text(BAD, b);
 	} else if (update) dot_text(GOOD, "This folder already has the game. Installing updates it and keeps your saves and settings.");
-	else dim("Needs about 5 GB while building, and about 1.6 GB after. It takes about 8 minutes and uses all your CPU cores.");
+	else if (!plat::has_file_dialogs()) dim("This system has no file dialog program (kdialog or zenity), so type the paths above.");
+	else dim("Needs about 5 GB while building, and about 1.6 GB after. It takes about 8 minutes on a desktop PC and longer on a Steam Deck, so keep a Deck plugged in.");
 	ImGui::Spacing();
 	if (accent_button(update ? "Update" : "Install", ImVec2(px(220), px(46)), ready)) {
 		g_root = target;
@@ -849,6 +869,7 @@ static void page_play() {
 		dot_text(GOOD, name);
 		ImGui::Spacing();
 	}
+	if (!running && !g_play_focused) { ImGui::SetKeyboardFocusHere(); g_play_focused = true; }   // (the controller starts on PLAY)
 	if (accent_button(running ? "Running..." : "PLAY", ImVec2(-1, px(64)), !running)) {
 		std::string err;
 		if (play(g_root, &err)) { set_status(""); g_finished_banner = false; plat::window_minimize(); }
@@ -906,6 +927,11 @@ static void page_play() {
 	ImGui::BeginDisabled(running);
 	if (g_has_payload) {
 		if (ImGui::Button("Reinstall or update...", ImVec2(b2, px(36)))) { snprintf(g_target, sizeof g_target, "%s", S(g_root).c_str()); g_page = P_SETUP; }
+	} else if (plat::can_add_to_steam()) {
+		if (ImGui::Button("Add to Steam", ImVec2(b2, px(36)))) {
+			bool ok = plat::add_to_steam(S(g_root / P(LAUNCHER_NAME)));
+			set_status(ok ? "Sent to Steam. Look for it under Non-Steam in your library." : "Steam did not take it. In Desktop Mode, use Add to Steam on this file's menu.", !ok);
+		}
 	} else if (ImGui::Button("Project page", ImVec2(b2, px(36)))) plat::open_url(REPO_URL);
 	ImGui::EndDisabled();
 	dim("In the game: Alt+Enter for fullscreen, F10 for settings and key bindings, - and = for volume.");
@@ -935,7 +961,7 @@ void app_frame() {
 			g_game = 0;
 			g_saves_checked = -100;
 			plat::window_restore();
-			if (code != 0) set_status("The game stopped with error code " + std::to_string(code) + ". Its log is Game\\session.log.", true);
+			if (code != 0) set_status("The game stopped with error code " + std::to_string(code) + ". Its log is Game/session.log.", true);
 		}
 	}
 	if (!g_art_tried && g_page == P_PLAY) {
