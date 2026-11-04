@@ -341,7 +341,7 @@ static void dec_vbw(uint64_t w, int sec, UOp *op) {
 	op->args[2] = (int32_t)BITS(w, 37, 36);     /* src2_exth */
 	op->mask = 0xF;
 	op->s0.bank = BK_NONE;
-	op->reps = 1; op->repmode = RM_EXTERNAL;
+	op->reps = (uint8_t)(BITS(w, 47, 44) + 1); op->repmode = RM_SLMSI;   /* its repeat_count: whole-matrix moves (Silent Hill: Book of Memories' UI vertex program) were one word */
 }
 
 /* ---- SOP2 / SOP2M / SOP3 (§3.11): U8 RGBA blend-style sum of products ---- */
@@ -555,7 +555,7 @@ static UOp decode_one(uint64_t w, int secondary) {
 			uint32_t fc = BITS(w, 40, 38);
 			if (fc == 5) { op.op = OP_NOP; return op; }               /* NOP */
 			if (fc == 0 || fc == 1) { dec_br(w, &op); return op; }    /* BR */
-			if (fc == 2) { op.op = OP_NOP; return op; }               /* return: treated as end-of-program (interpreter stops at instr_count) */
+			if (fc == 2) { op.op = OP_RET; return op; }               /* return: treated as end-of-program (interpreter stops at instr_count) */
 			op.op = OP_UNSUPPORTED; return op;
 		}
 		if (opcat == 1 && op2 == 2) { dec_smlsi(w, &op); return op; }
@@ -800,7 +800,7 @@ static int32_t slot_offset(Ctx *cx, int mode, int bank, int slot, int r, const i
 	if (r != cx->cur_rep) { stage_commit(cx); cx->cur_rep = r; }   /* a new repeat: the previous one's writes land first */
 	int is_fpi = (bank == BK_FPI);
 	switch (mode) {
-	case RM_EXTERNAL: return is_fpi ? 0 : 4 * r;
+	case RM_EXTERNAL: return is_fpi ? r : 4 * r;   /* internal registers step one a repeat here too: Silent Hill: Book of Memories' lighting (VMAD rpt 2 to i1, then i1 and i2 read) */
 	case RM_INTERNAL: return is_fpi ? r : 0;
 	case RM_BOTH: return is_fpi ? r : 4 * r;
 	default: { int rr = r < 0 ? 0 : r > 16 ? 16 : r; int v = cx->inc[slot & 3][rr]; return in_mult_set(bank) ? v * mult[slot & 3] : v; }
@@ -1010,9 +1010,12 @@ static void exec_vtstmsk(Ctx *cx, const UOp *op) {
 }
 static uint32_t rol32(uint32_t v, int s) { s &= 31; return s ? (v << s) | (v >> (32 - s)) : v; }
 static void exec_vbw(Ctx *cx, const UOp *op) {
-	uint32_t a = read_i32(cx, &op->s1, 0, 0), b;
+	static const int unit[4] = {1, 1, 1, 1};
+	for (int rep = 0; rep < op->reps; rep++) {
+	int off1 = slot_offset(cx, op->repmode, op->s1.bank, 1, rep, unit), off2 = slot_offset(cx, op->repmode, op->s2.bank, 2, rep, unit), offd = slot_offset(cx, op->repmode, op->dst.bank, 3, rep, unit);
+	uint32_t a = read_i32(cx, &op->s1, off1, 0), b;
 	if (op->s2.bank == BK_IMM) b = (uint32_t)op->s2.num | ((uint32_t)op->imm << 7) | ((uint32_t)op->args[2] << 14);
-	else b = read_i32(cx, &op->s2, 0, 0);
+	else b = read_i32(cx, &op->s2, off2, 0);
 	int rot = op->args[0] & 31;
 	b = op->sub3 ? (uint32_t)(((b << (rot & 15)) | (b >> (16 - (rot & 15)))) & 0xFFFF) : rol32(b, rot);
 	if (op->args[1]) b = op->sub3 ? (~b & 0xFFFFu) : ~b;
@@ -1025,7 +1028,8 @@ static void exec_vbw(Ctx *cx, const UOp *op) {
 	default: result = a; break;
 	}
 	if (op->sub3) result &= 0xFFFFu;
-	write_raw_lane(cx, &op->dst, 0, 0, result);
+	write_raw_lane(cx, &op->dst, offd, 0, result);
+	}
 }
 static void u8_unpack(uint32_t w, float rgb[3], float *a) { rgb[0] = (w & 0xFF) / 255.0f; rgb[1] = ((w >> 8) & 0xFF) / 255.0f; rgb[2] = ((w >> 16) & 0xFF) / 255.0f; *a = ((w >> 24) & 0xFF) / 255.0f; }
 static float clamp01(float v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
@@ -1407,11 +1411,13 @@ static void exec_instruction(Ctx *cx, const UOp *op) {
 static const char *opname(int op);
 static void run_program(Ctx *cx, const UOp *code, int n) {
 	for (int s = 0; s < 4; s++) for (int r = 0; r <= 16; r++) cx->inc[s][r] = (int8_t)r;
-	int guard = 0;
-	for (int pc = 0; pc < n && !cx->t->killed; ) {
+	int guard = 0, link = -1;
+	for (int pc = usse_entry(code, n); pc < n && !cx->t->killed; ) {
 		const UOp *op = &code[pc];
+		if (op->op == OP_RET) { if (link < 0) break; pc = link; link = -1; continue; }   /* (no call under way: the program ends) */
 		if (op->op == OP_BR) {
 			if (pred_true(cx, op)) {
+				if (op->args[0]) link = pc + 1;   /* save_link: a call */
 				pc = pc + op->imm;
 				if (++guard > 100000) break;   /* a runaway backward branch; stop rather than hang the pixel/vertex */
 				continue;
@@ -1902,7 +1908,7 @@ static const char *opname(int op) {
 	case OP_VDUAL: return "VDUAL"; case OP_VCOMP: return "VCOMP"; case OP_VMOV: return "VMOV"; case OP_VPCK: return "VPCK"; case OP_VTST: return "VTST";
 	case OP_VTSTMSK: return "VTSTMSK"; case OP_VBW: return "VBW"; case OP_SOP2: return "SOP2"; case OP_SOP2M: return "SOP2M"; case OP_SOP3: return "SOP3";
 	case OP_I8MAD: return "I8MAD"; case OP_I16MAD: return "I16MAD"; case OP_I32MAD: return "I32MAD"; case OP_I32MAD2: return "I32MAD2"; case OP_SMP: return "SMP";
-	case OP_BR: return "BR"; case OP_SMLSI: return "SMLSI"; case OP_SMBO: return "SMBO"; case OP_KILL: return "KILL"; case OP_LIMM: return "LIMM";
+	case OP_RET: return "RET"; case OP_BR: return "BR"; case OP_SMLSI: return "SMLSI"; case OP_SMBO: return "SMBO"; case OP_KILL: return "KILL"; case OP_LIMM: return "LIMM";
 	case OP_DEPTHF: return "DEPTHF"; case OP_LDST: return "LDST"; default: return "???";
 	}
 }
@@ -1926,7 +1932,7 @@ int usse_disassemble(const UsseProgram *p, void *out_FILE) {
 		for (int i = 0; i < n; i++) {
 			const UOp *o = &ops[i];
 			fprintf(f, "  %4d: %016llx  %-8s", i, (unsigned long long)o->raw, opname(o->op));
-			if (o->op == OP_UNSUPPORTED) { unk++; fprintf(f, "  <-- unsupported encoding"); }
+			if (o->op == OP_UNSUPPORTED) { unk++; fprintf(f, "  <-- unsupported encoding"); } else fprintf(f, " m%x r%d/%d sub %d %d %d dst b%d %d t%d | s0 b%d %d t%d n%d sw%d%d%d%d | s1 b%d %d t%d n%d sw%d%d%d%d | s2 b%d %d t%d n%d sw%d%d%d%d", o->mask, o->reps, o->repmode, o->sub, o->sub2, o->sub3, o->dst.bank, o->dst.num, o->dst.type, o->s0.bank, o->s0.num, o->s0.type, o->s0.negabs, o->s0.swiz[0], o->s0.swiz[1], o->s0.swiz[2], o->s0.swiz[3], o->s1.bank, o->s1.num, o->s1.type, o->s1.negabs, o->s1.swiz[0], o->s1.swiz[1], o->s1.swiz[2], o->s1.swiz[3], o->s2.bank, o->s2.num, o->s2.type, o->s2.negabs, o->s2.swiz[0], o->s2.swiz[1], o->s2.swiz[2], o->s2.swiz[3]);
 			fprintf(f, "\n");
 		}
 	}

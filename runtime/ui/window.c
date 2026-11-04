@@ -115,6 +115,14 @@ static uint64_t rel_since_us;              /* when the capture last began (rel_o
 static int mouse_dx_q8, mouse_dy_q8;       /* motion since a raw-look hook last took it, x256 (atomics) */
 static int look_dx_q8, look_dy_q8;         /* the same motion, for the right-stick stand-in (this thread) */
 static volatile uint64_t raw_taken_us;     /* when a raw-look hook last took the motion */
+/* settings "mouse_left" / "mouse_right": the Vita button a captured mouse button presses (r, l, cross, circle, square, triangle, none) */
+static uint32_t mouse_bit_named(const char *key, uint32_t def) {
+	char b[16]; settings_str(key, "", b, sizeof b);
+	static const struct { const char *n; uint32_t bit; } t[] = {{"r", 0x200}, {"l", 0x100}, {"cross", 0x4000}, {"circle", 0x2000}, {"square", 0x8000}, {"triangle", 0x1000}, {"none", 0}};
+	for (unsigned i = 0; i < sizeof t / sizeof t[0]; i++) if (!strcmp(b, t[i].n)) return t[i].bit;
+	return def;
+}
+static uint32_t mouse_lmb_bit = 0x200, mouse_rmb_bit = 0x100;
 static int kbm_lmb, kbm_rmb;               /* captured mouse buttons held (R, L) */
 /* Tilt (motion.c's virtual pad): Uncharted's balance beams and river slide are steered by tilting the Vita, and
  * keyboard and mouse have no gyro. In a tilt section (window_tilt_tick: the section's per-frame update, hooked in
@@ -161,6 +169,7 @@ static void kb_reload(void) {   /* the bindings from settings (at start, and whe
 		SDL_Keycode k = SDL_GetKeyFromName(name);
 		kb_binds[i].kc = k != SDLK_UNKNOWN ? k : SDL_GetKeyFromName(kb_binds[i].def);
 	}
+	mouse_lmb_bit = mouse_bit_named("mouse_left", RTRIG); mouse_rmb_bit = mouse_bit_named("mouse_right", LTRIG);
 	char sb[16]; shoulders_swapped = !strcmp(settings_str("shoulder_buttons", "triggers", sb, sizeof sb), "bumpers");
 }
 int window_kb_count(void) { return KB_N; }
@@ -233,8 +242,28 @@ void window_set_aspect(int mode) {
 	settings_set_str("aspect", aspect_name(mode)); settings_save();
 }
 int window_get_fullscreen(void) { return win && (SDL_GetWindowFlags(win) & SDL_WINDOW_FULLSCREEN) != 0; }
+/* Fullscreen renders at the display's own resolution: the integer render scale whose picture first covers the screen (4x at
+ * 2160p, 2x at 1080p, 3x at 1440p), the picture letterboxed at its own shape as ever. The scale in the window comes back on the
+ * way out; it is kept in "windowed_render_scale" so a quit in fullscreen doesn't leave the window at 4x next time. */
+extern int gfx_gpu_render_scale_wanted(void), gfx_gpu_render_scale_max(void); extern void gfx_gpu_render_scale_request(int n);
+static void fullscreen_render_scale(int on) {
+	if (on && win) {
+		const SDL_DisplayMode *dm = SDL_GetDesktopDisplayMode(SDL_GetDisplayForWindow(win));
+		if (!dm) return;
+		float d = dm->pixel_density > 0 ? dm->pixel_density : 1.0f, kx = dm->w * d / 960.0f, ky = dm->h * d / 544.0f, k = kx < ky ? kx : ky;
+		int n = (int)ceilf(k - 0.05f), mx = gfx_gpu_render_scale_max();
+		if (n < 1) n = 1; if (n > mx) n = mx;
+		if (!settings_int("windowed_render_scale", 0)) { settings_set_int("windowed_render_scale", gfx_gpu_render_scale_wanted()); settings_save(); }
+		fprintf(stderr, "    fullscreen: display %dx%d: render scale %d (%dx%d)\n", (int)(dm->w * d), (int)(dm->h * d), n, 960 * n, 544 * n);
+		gfx_gpu_render_scale_request(n);
+	} else if (!on) {
+		int n = settings_int("windowed_render_scale", 0);
+		if (n > 0) { fprintf(stderr, "    windowed: render scale %d\n", n); gfx_gpu_render_scale_request(n); settings_set_int("windowed_render_scale", 0); settings_save(); }
+	}
+}
 void window_set_fullscreen(int on) {
 	if (win) SDL_SetWindowFullscreen(win, on != 0);
+	fullscreen_render_scale(on != 0);
 	settings_set_int("fullscreen", on != 0); settings_save();
 }
 /* ---- wider aspect ratios (settings "aspect_ratio": native | 21:9 | 32:9 | window): the factor k the game's
@@ -924,6 +953,7 @@ void window_run(void *(*fn)(void *), void *arg) {
 	{ char b[16]; settings_str("aspect", "fit", b, sizeof b);
 	  aspect_mode = !strcmp(b, "stretch") ? ASPECT_STRETCH : !strcmp(b, "fill") ? ASPECT_FILL : ASPECT_FIT; }   /* window_set_aspect also saves: read it in directly instead, nothing changed yet */
 	if (settings_int("fullscreen", 0)) SDL_SetWindowFullscreen(win, true);
+	fullscreen_render_scale(settings_int("fullscreen", 0));
 	if (gpu) overlay_init(gpu, win, SDL_GetGPUSwapchainTextureFormat(gpu, win));
 	SDL_Gamepad *pad = 0;
 	int pad_back = 0, pad_start = 0, pad_combo_latch = 0;
@@ -948,6 +978,7 @@ void window_run(void *(*fn)(void *), void *arg) {
 			 * shortcut, the menu -- is the setting: the next game starts the same way */
 			if ((e.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN || e.type == SDL_EVENT_WINDOW_LEAVE_FULLSCREEN) && settings_int("fullscreen", 0) != (e.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN)) {
 				settings_set_int("fullscreen", e.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN); settings_save();
+				fullscreen_render_scale(e.type == SDL_EVENT_WINDOW_ENTER_FULLSCREEN);
 			}
 			/* the overlay itself: always live, open or not, so it can always be reached and always
 			 * closed. Opening (or re-opening by the same gamepad combo) clears whatever buttons/touch
@@ -982,6 +1013,14 @@ void window_run(void *(*fn)(void *), void *arg) {
 			 * the input to keyboard + mouse */
 			if (e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_FINGER_MOTION || e.type == SDL_EVENT_FINGER_UP || e.type == SDL_EVENT_FINGER_CANCELED) { screen_finger(&e); continue; }
 			if ((e.type == SDL_EVENT_MOUSE_MOTION && e.motion.which == SDL_TOUCH_MOUSEID) || ((e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_UP) && e.button.which == SDL_TOUCH_MOUSEID)) continue;
+			if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_RETURN && (SDL_GetModState() & SDL_KMOD_ALT)) window_set_fullscreen(!window_get_fullscreen());
+			if (e.type == SDL_EVENT_KEY_DOWN && !overlay_is_open() && (e.key.key == SDLK_MINUS || e.key.key == SDLK_KP_MINUS || e.key.key == SDLK_EQUALS || e.key.key == SDLK_KP_PLUS)) {
+				/* the master volume in 5% steps: - and = beside Backspace, - and + on the keypad */
+				int up = e.key.key == SDLK_EQUALS || e.key.key == SDLK_KP_PLUS, pct = (int)lroundf((float)settings_float("volume", 1.0) * 100.0f);
+				pct = up ? (pct + 5) / 5 * 5 : (pct - 1) / 5 * 5; if (pct < 0) pct = 0; if (pct > 100) pct = 100;
+				settings_set_float("volume", pct / 100.0f); settings_save();
+				char vm[32]; snprintf(vm, sizeof vm, "%d%%", pct); overlay_toast_titled("Volume", vm, 1.5);
+			}
 			if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_F12) { extern void gfxcap_request(void); gfxcap_request(); fprintf(stderr, "capture requested (F12)\n"); }
 			if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_F1) metrics_osd_cycle();
 			if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_F5) {   /* a marker in the log: "that just happened" for a bug report (a doubled voice line, a glitch) */
@@ -1002,6 +1041,15 @@ void window_run(void *(*fn)(void *), void *arg) {
 			if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && e.key.key == SDLK_F2) { extern void gfx_gpu_render_scale_cycle(void); gfx_gpu_render_scale_cycle(); }   /* the GPU backend's internal resolution, 1x -> 2x -> ... -> 6x, from the next frame */
 			if ((e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat) || e.type == SDL_EVENT_KEY_UP) {   /* the bound keys (kb_binds) */
 				int i = kb_find(e.key.key), dn = e.type == SDL_EVENT_KEY_DOWN;
+				if (e.key.key == SDLK_RETURN && dn && (SDL_GetModState() & SDL_KMOD_ALT)) continue;   /* (Alt+Enter is the fullscreen toggle, not a button) */
+				/* settings "menu_keys" 1: with the D-pad and Cross bound elsewhere, the keys every PC menu answers to still work:
+				 * the arrows the D-pad, Enter Cross, Escape Start (the menu closed) */
+				if (i < 0 && settings_int("menu_keys", 0) && !display_pstv_active()) {
+					uint32_t alias = e.key.key == SDLK_UP ? UP : e.key.key == SDLK_DOWN ? DOWN : e.key.key == SDLK_LEFT ? LEFT : e.key.key == SDLK_RIGHT ? RIGHT
+					               : e.key.key == SDLK_RETURN ? CROSS : e.key.key == SDLK_ESCAPE && !overlay_is_open() ? START : 0;
+					if (alias) { if (dn) { buttons |= alias; kbm_used(); kbm_auto = 1; } else buttons &= ~alias; }
+				}
+				if (i >= 0 && dn && e.key.key == SDLK_TAB && (SDL_GetModState() & SDL_KMOD_ALT)) i = -1;   /* (Alt+Tab is Windows', not Start) */
 				if (i >= 0) {
 					kb_binds[i].held = dn;
 					if (kb_binds[i].bit && !display_pstv_active()) { if (dn) buttons |= kb_binds[i].bit; else buttons &= ~kb_binds[i].bit; }   /* (the PS TV layout: a controller's only, kbm_used) */
@@ -1094,8 +1142,8 @@ void window_run(void *(*fn)(void *), void *arg) {
 					look_dx_q8 += qx; look_dy_q8 += qy;
 				} else {
 					int dn = e.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
-					if (e.button.button == SDL_BUTTON_LEFT) { kbm_lmb = dn; if (dn) buttons |= RTRIG; else buttons &= ~RTRIG; }
-					if (e.button.button == SDL_BUTTON_RIGHT) { kbm_rmb = dn; if (dn) buttons |= LTRIG; else buttons &= ~LTRIG; }
+					if (e.button.button == SDL_BUTTON_LEFT) { kbm_lmb = dn; if (dn) buttons |= mouse_lmb_bit; else buttons &= ~mouse_lmb_bit; }
+					if (e.button.button == SDL_BUTTON_RIGHT) { kbm_rmb = dn; if (dn) buttons |= mouse_rmb_bit; else buttons &= ~mouse_rmb_bit; }
 				}
 				continue;
 			}
@@ -1149,7 +1197,7 @@ void window_run(void *(*fn)(void *), void *arg) {
 			if (want != rel_on && win) {
 				if (!SDL_SetWindowRelativeMouseMode(win, want) && want) fprintf(stderr, "mouse: capture refused: %s\n", SDL_GetError());
 				if (want) rel_since_us = now_us();   /* (the capture's first motion can carry the pointer's jump to the centre: dropped) */
-				if (!want) { if (gesture_drag) { gesture_drag = 0; touch_down = 0; } if (twist_drag) { twist_drag = 0; twist_down = twist_pad; } if (kbm_lmb) buttons &= ~RTRIG; if (kbm_rmb) buttons &= ~LTRIG; kbm_lmb = kbm_rmb = 0; __atomic_store_n(&mouse_dx_q8, 0, __ATOMIC_RELAXED); __atomic_store_n(&mouse_dy_q8, 0, __ATOMIC_RELAXED); }
+				if (!want) { if (gesture_drag) { gesture_drag = 0; touch_down = 0; } if (twist_drag) { twist_drag = 0; twist_down = twist_pad; } if (kbm_lmb) buttons &= ~mouse_lmb_bit; if (kbm_rmb) buttons &= ~mouse_rmb_bit; kbm_lmb = kbm_rmb = 0; __atomic_store_n(&mouse_dx_q8, 0, __ATOMIC_RELAXED); __atomic_store_n(&mouse_dy_q8, 0, __ATOMIC_RELAXED); }
 				rel_on = want;
 			}
 			tilt_section_update();

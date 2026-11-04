@@ -1,3 +1,6 @@
+#ifdef _WIN32
+#include <windows.h>
+#endif
 /*
  * Native host for a recompiled Vita executable (recompiler/recomp.py output): the proof-of-boot
  * runner. Maps the 4 GiB guest arena, loads the module's memory image (recompiler/mkimage.py),
@@ -355,7 +358,7 @@ void recomp_call_external(Cpu *c, uint32_t addr) {
 		const int is_fmt = (fl & RF_FMT) != 0;
 		uint32_t buf = c->r[0];
 		if (f) {
-			uint32_t a0 = c->r[0], a1 = c->r[1], a2 = c->r[2], a3 = c->r[3];
+			uint32_t lr0 = c->r[14]; uint32_t a0 = c->r[0], a1 = c->r[1], a2 = c->r[2], a3 = c->r[3];
 			gfxcov_api(name, fn, c, 1);   /* RECOMP_GFX_COVERAGE: handled by a module */
 			if (fn) {   /* the boundary's observer, then Sony's function */
 				/* the observer renders (the GPU's work on the hardware, done asynchronously there): under
@@ -369,8 +372,9 @@ void recomp_call_external(Cpu *c, uint32_t addr) {
 				c->r[0] = a0; c->r[1] = a1; c->r[2] = a2; c->r[3] = a3;
 			}
 			f(c);
-			if ((fl & RF_GXM) && log_gxm())
-				fprintf(stderr, "gxm %-44s %08x %08x %08x %08x -> %08x (Sony)\n", name, a0, a1, a2, a3, c->r[0]);
+			if ((fl & RF_GXM) && log_gxm()) {
+				{ char tn[32] = ""; plat_thread_name(tn, sizeof tn); if (!strcmp(name, "sceGxmBeginScene") || !strcmp(name, "sceGxmEndScene") || c->r[0] >> 16 == 0x805b) fprintf(stderr, "scene [%s] %s -> %x lr %x\n", tn, name, c->r[0], lr0); }
+				fprintf(stderr, "gxm [%u] %-44s %08x %08x %08x %08x -> %08x lr %08x (Sony)\n", (unsigned)GetCurrentThreadId(), name, a0, a1, a2, a3, c->r[0], lr0); }
 			{   /* RECOMP_TRACE_MODULE=<prefix>[,...]: calls to a loaded module's exports by those names, with the first
 			     * four arguments and the result (RECOMP_LOG_IMPORTS sees only the host's) */
 				static const char *tr; static int tr_init; if (!tr_init) { tr = getenv("RECOMP_TRACE_MODULE"); tr_init = 1; }

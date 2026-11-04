@@ -246,7 +246,7 @@ static const char *const g_shortcuts[][3] = {
 };
 static void volume_slider(void) {   /* (the bar's Game menu) */
 	prefs_load();
-	float pct = P.vol * 100.0f;
+	P.vol = (float)settings_float("volume", 1.0); float pct = P.vol * 100.0f;
 	ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10);
 	if (ImGui::SliderFloat("##vol", &pct, 0.0f, 100.0f, "%.0f%%")) set_volume(pct / 100.0f);
 }
@@ -412,7 +412,7 @@ static void page_game(void) {
 		}
 	}
 	ui::row("Volume");
-	{ float pct = P.vol * 100.0f; ImGui::SetNextItemWidth(-FLT_MIN); if (ImGui::SliderFloat("##vol", &pct, 0.0f, 100.0f, "%.0f%%")) set_volume(pct / 100.0f); }
+	{ P.vol = (float)settings_float("volume", 1.0); float pct = P.vol * 100.0f; ImGui::SetNextItemWidth(-FLT_MIN); if (ImGui::SliderFloat("##vol", &pct, 0.0f, 100.0f, "%.0f%%")) set_volume(pct / 100.0f); }
 	ui::rows_end();
 }
 extern "C" int camera_light(void); extern "C" void camera_light_set(int on);

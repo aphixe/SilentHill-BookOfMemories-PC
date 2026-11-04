@@ -397,6 +397,17 @@ class Fn:
             return [f"c->r[14] = 0x{nxt | self.tbit:x}u; {{ RecompJmp *rj = recomp_setjmp_begin(c); if (!_setjmp(rj->host)) c->r[0] = 0; }} if (c->stop) return;"]
         return [f"c->r[14] = 0x{nxt | self.tbit:x}u; recomp_call_external(c, 0x{target:x}u); if (c->stop) return;"]
 
+    def tail(self, target, nxt):
+        # a branch (b, b<cc>, cbz, cbnz) out of this function: no link register written. A loop that keeps a value in lr
+        # (Silent Hill: Book of Memories' CSV reader, its token end) reached its other half through a false entry point
+        # found in the data, and a call's "lr = next" here made it scan to the end of the file
+        t = target & ~1
+        if t in self.entries:
+            return [f"fn_{t:08x}(c); if (c->stop) return;"]
+        if t in SETJMP_STUBS:
+            return self.call(target, nxt)
+        return [f"recomp_call_external(c, 0x{target:x}u); if (c->stop) return;"]
+
     def branch(self, i, mn, ops):
         nxt = i.address + i.size
         cc = i.cc
@@ -405,14 +416,14 @@ class Fn:
             if t in self.addrs:
                 body = [f"goto L_{t:08x};"]
             else:   # a tail call into another function
-                body = self.call(t, nxt) + ["return;"]
+                body = self.tail(t, nxt) + ["return;"]
             return body if cc == 15 else [f"if (COND(c, {cc})) {{"] + body + ["}"]
         if mn in ("cbz", "cbnz"):
             r, t = self.r(ops[0].reg, i), ops[1].imm & 0xffffffff
             test = f"{r} {'==' if mn == 'cbz' else '!='} 0"
             if t in self.addrs:
                 return [f"if ({test}) goto L_{t:08x};"]
-            return [f"if ({test}) {{"] + self.call(t, nxt) + ["return; }"]
+            return [f"if ({test}) {{"] + self.tail(t, nxt) + ["return; }"]
         if mn == "bl" or (mn == "blx" and ops[0].type == ARM_OP_IMM):
             body = self.call(ops[0].imm & 0xffffffff, nxt)
             return body if cc == 15 else [f"if (COND(c, {cc})) {{"] + body + ["}"]
@@ -508,6 +519,21 @@ class Fn:
             miss = f"o[k]" if mn == "vtbx" else "0"
             return [f"{{ uint8_t t[32], ix[8], o[8]; {loads} memcpy(ix, &c->vfp.d[{ix}], 8); memcpy(o, &c->vfp.d[{dd}], 8);"
                     f" for (int k = 0; k < 8; k++) o[k] = ix[k] < {n} ? t[ix[k]] : {miss}; memcpy(&c->vfp.d[{dd}], o, 8); }}"]
+        if mn in ("vzip", "vuzp") and dt in ("8", "16", "32") and len(regs) == 2 and regs[0][0] == regs[1][0]:
+            # interleave (vzip) or de-interleave (vuzp) the elements of D and M: the low half of the result to D, the high to M.
+            # Silent Hill: Book of Memories' audio mixer widens its 16-bit samples with vzip.16 (a crash once a sound reached it)
+            (a0, cnt), (b0, _) = dbytes(regs[0]), dbytes(regs[1])
+            es, nb = int(dt) // 8, 8 * cnt
+            ne = nb // es
+            if mn == "vzip":
+                body = f"for (int k = 0; k < {ne}; k++) {{ memcpy(o + 2 * k * {es}, a + k * {es}, {es}); memcpy(o + (2 * k + 1) * {es}, b + k * {es}, {es}); }}"
+            else:
+                body = (f"for (int k = 0; k < {ne}; k++) {{ memcpy(o + k * {es}, a + 2 * k * {es}, {es}); memcpy(o + {nb} + k * {es}, a + (2 * k + 1) * {es}, {es}); }}")
+            if mn == "vzip":
+                return [f"{{ uint8_t a[{nb}], b[{nb}], o[{2 * nb}]; memcpy(a, &c->vfp.d[{a0}], {nb}); memcpy(b, &c->vfp.d[{b0}], {nb}); {body}"
+                        f" memcpy(&c->vfp.d[{a0}], o, {nb}); memcpy(&c->vfp.d[{b0}], o + {nb}, {nb}); }}"]
+            return [f"{{ uint8_t a[{2 * nb}], o[{2 * nb}]; memcpy(a, &c->vfp.d[{a0}], {nb}); memcpy(a + {nb}, &c->vfp.d[{b0}], {nb}); {body}"
+                    f" memcpy(&c->vfp.d[{a0}], o, {nb}); memcpy(&c->vfp.d[{b0}], o + {nb}, {nb}); }}"]
         if mn == "vtrn" and dt == "32" and len(regs) == 2 and regs[0][0] == regs[1][0]:
             (a0, cnt), (b0, _) = dbytes(regs[0]), dbytes(regs[1])
             out = []

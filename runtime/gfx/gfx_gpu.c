@@ -945,7 +945,9 @@ static int shader_translate(ShaderEntry *e, const UsseProgram *prog, const UsseV
 	SpirvModule m = usse_spirv_translate(prog, vl, fl, sa_tex_unit, 16, smp_units, &nsmp, e->kind < 0 ? 0 : e->kind, e->cube_mask, e->snap_mask, vf);
 	usse_spirv_set_pcf(-1, 0); usse_spirv_set_points(0); usse_spirv_set_probe_off(0); usse_spirv_set_fetch_zero(0); usse_spirv_set_motion(0);
 	uint64_t tb1 = us_now(); t_shader_xlate += tb1 - tb0;
-	if (!m.ok) { fprintf(stderr, "    gpu: %#x: %s\n", e->addr, m.err); usse_spirv_free(&m); return 0; }
+	{ const char *da = getenv("RECOMP_SHADER_DIS_ADDR"); if (da && strtoul(da, 0, 16) == e->addr) { fprintf(stderr, "=== disasm %#x ok %d nsmp %d%c", e->addr, m.ok, nsmp, 10); usse_disassemble(prog, stderr); if (vl) { for (int ti = 0; ti < 10; ti++) if (vl->o_tex[ti] >= 0) fprintf(stderr, "o_tex[%d] = %d n %d\n", ti, vl->o_tex[ti], vl->ncomp_tex[ti]); fprintf(stderr, "o_color0 %d\n", vl->o_color0); } } }
+	{ const char *dd = getenv("RECOMP_SPV_DUMP"); if (dd && m.ok) { static int sn; char pth[512]; snprintf(pth, sizeof pth, "%s/s%05d_%08x.spv", dd, __atomic_fetch_add(&sn, 1, __ATOMIC_RELAXED), e->addr); FILE *df = fopen(pth, "wb"); if (df) { fwrite(m.words, 4, m.nwords, df); fclose(df); } } }
+	if (!m.ok) { fprintf(stderr, "    gpu: %#x: %s\n", e->addr, m.err); if (getenv("RECOMP_SHADER_DIS") && e->addr >= 0x81000000u && strstr(m.err, "SMP")) usse_disassemble(prog, stderr); usse_spirv_free(&m); return 0; }
 	int is_frag = usse_is_fragment(prog);
 	e->fetch = m.frag_fetch; e->nldst = m.nldst_sa; e->pa_words = m.pa_words; memcpy(e->ldst_sa, m.ldst_sa, sizeof e->ldst_sa);
 	e->nsmp = nsmp; memcpy(e->smp_units, smp_units, sizeof smp_units);
@@ -2147,6 +2149,8 @@ static void pipe_create_info(const GfxDraw *d, const ShaderEntry *vs, const Shad
 	/* ALWAYS with keep/keep/keep is a no-op; ALWAYS with a write op (Unit 13 draws its clip masks
 	 * that way: always, depth-pass INCR) is not -- skipping those dropped the mask entirely */
 	dss.enable_stencil_test = has_depth && stencil_ok && (d->stencil_func != 7 || d->stencil_fail || d->depth_fail || d->depth_pass);
+	if (getenv("RECOMP_DBG_NODTEST") && !d->depth_write) dss.enable_depth_test = 0;
+	if (getenv("RECOMP_DBG_NOSTENCIL")) dss.enable_stencil_test = 0;
 	SDL_GPUStencilOpState sos = { conv_sop(d->stencil_fail), conv_sop(d->depth_pass), conv_sop(d->depth_fail), conv_cmp(d->stencil_func) };
 	dss.front_stencil_state = dss.back_stencil_state = sos; dss.compare_mask = d->stencil_cmask; dss.write_mask = d->stencil_wmask;
 
@@ -2184,6 +2188,7 @@ static void pipe_create_info(const GfxDraw *d, const ShaderEntry *vs, const Shad
 		ci.rasterizer_state.depth_bias_slope_factor = (float)(d->depth_bias_factor * dbs); ci.rasterizer_state.depth_bias_clamp = 0;   /* (bias_scale) */
 	}
 	ci.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+	{ const char *eb = getenv("RECOMP_DBG_COLOURPASS_BIAS"); if (eb && d->depth_func == 3 && !d->depth_write) { ci.rasterizer_state.enable_depth_bias = true; ci.rasterizer_state.depth_bias_constant_factor += (float)atof(eb); } }
 	ci.depth_stencil_state = dss;
 	ci.target_info.num_color_targets = 1;   /* (the colour target: the job's copy of ctd, pipeline_build) */
 	ci.target_info.has_depth_stencil_target = has_depth; ci.target_info.depth_stencil_format = depth_format();
@@ -3481,7 +3486,7 @@ static SDL_GPUTextureFormat view_format(int from_depth, int mode, int src_kind, 
 	SDL_GPUTextureFormat f = SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT;
 	if (!view_fast_on() || from_depth || filtered) return f;
 	switch (mode) {
-	case 3: case 5: f = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; break;
+	case 3: case 5: case 9: f = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM; break;
 	case 4: f = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_SNORM; break;
 	case 0: f = src_kind == TK_F32 ? SDL_GPU_TEXTUREFORMAT_R32G32B32A32_FLOAT : kind_format(src_kind); break;
 	case 1: f = SDL_GPU_TEXTUREFORMAT_R11G11B10_UFLOAT; break;
@@ -3691,6 +3696,13 @@ static TexEntry views[MAXVIEW]; static int nviews;
 static void views_release_samplers(void) { for (int i = 0; i < nviews; i++) tex_release_samplers(&views[i]); }
 static int no_views(void) { static int v = -1; if (v < 0) v = getenv("RECOMP_GPU_NO_VIEWS") != 0; return v; }   /* RECOMP_GPU_NO_VIEWS=1: the guest-memory path for every render-target read (an A/B check) */
 /* which decode the view shader runs for a target's format read by a texture's base format (-1: none known); tex_bpp: the texture's bytes per texel */
+static uint32_t view_cur_fprog;   /* the draw binding textures now */
+static int gbuf_view_ok(void) {
+	if (getenv("RECOMP_DBG_NO_GBUF_VIEW")) return 0;
+	if (!(SDL_GetGPUShaderFormats(gpu()) & SDL_GPU_SHADERFORMAT_SPIRV)) return 0;   /* (view_gb.frag: Vulkan so far) */
+	const char *e = getenv("RECOMP_GBUF_EXCLUDE"); if (!e) return 1;
+	char want[16]; snprintf(want, sizeof want, "%x", view_cur_fprog); return !strstr(e, want);
+}
 static int view_mode(uint32_t tgt_fmt, const GfxTexture *tex, uint32_t *tex_bpp, uint32_t swz[4]) {
 	uint32_t tb = tgt_fmt & 0xF1800000u, xb = tex->format & 0xff000000u, sw = (tex->format >> 12) & 7;
 	*tex_bpp = 4;
@@ -3709,7 +3721,7 @@ static int view_mode(uint32_t tgt_fmt, const GfxTexture *tex, uint32_t *tex_bpp,
 	case 0x10800000u: return xb == 0x12000000u ? 6 : -1;                                        /* F32 as F32 (mode 5's decode at full precision: Uncharted's
 	                                                                                               * shadow mask went through guest memory, its lighting read
 	                                                                                               * it at 1x and every lit silhouette got a 1x-pixel halo) */
-	case 0x01000000u: *tex_bpp = 8; return xb == 0x1b000000u ? 0 : -1;                          /* F16F16F16F16 as F16F16F16F16 */
+	case 0x01000000u: if (xb == 0x0c000000u) { *tex_bpp = 4; return gbuf_view_ok() ? 9 : -1; } *tex_bpp = 8; return xb == 0x1b000000u ? 0 : -1;                          /* F16F16F16F16 as F16F16F16F16 */
 	case 0x21000000u: return xb == 0x1a000000u ? 1 : -1;                                        /* F11F11F10 as F11F11F10 */
 	case 0x41000000u: return xb == 0x9a000000u ? 2 : -1;                                        /* U2F10F10F10 as U2F10F10F10 */
 	case 0x11000000u: return xb == 0x0c000000u ? 3 : xb == 0x0d000000u ? 4 : -1;                /* F32F32 as U8U8U8U8 / S8S8S8S8 bytes */
@@ -4134,6 +4146,36 @@ static BatchEvent *batch_event(void) {
 }
 /* view_render's pass, into whichever command buffer: the full-screen triangle decoding src into dst */
 static void view_pass(SDL_GPUCommandBuffer *cmd, SDL_GPUTexture *dst, SDL_GPUTexture *src, int from_depth, const ViewU *u) {
+	if (u->mode == 9u) {   /* a G-buffer's words: through an integer copy of the target, see view_gb.frag */
+		static SDL_GPUTexture *raw; static uint32_t rw, rh; static SDL_GPUGraphicsPipeline *pipes[NVIEWFMT]; static SDL_GPUShader *fs;
+		const uint32_t w = u->tgt_w * u->scale, h = u->tgt_h * u->scale_y; const int fi = view_fmt_index((SDL_GPUTextureFormat)u->vfmt);
+		if (raw && (rw != w || rh != h)) { SDL_ReleaseGPUTexture(gpu(), raw); raw = 0; }
+		if (!raw) { SDL_GPUTextureCreateInfo tci = { .type = SDL_GPU_TEXTURETYPE_2D, .format = SDL_GPU_TEXTUREFORMAT_R16G16B16A16_UINT, .usage = SDL_GPU_TEXTUREUSAGE_SAMPLER, .width = w, .height = h, .layer_count_or_depth = 1, .num_levels = 1, .sample_count = SDL_GPU_SAMPLECOUNT_1 }; raw = SDL_CreateGPUTexture(gpu(), &tci); rw = w; rh = h; }
+		if (!fs) fs = builtin_shader(view_msl, "main0_view", vk_view_gb_frag, sizeof vk_view_gb_frag, SDL_GPU_SHADERSTAGE_FRAGMENT, 1, 1);
+		if (fi >= 0 && !pipes[fi] && fs) {
+			SDL_GPUGraphicsPipelineCreateInfo ci = {0};
+			ci.vertex_shader = view_vertex_shader(); ci.fragment_shader = fs; ci.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
+			ci.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL; ci.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE; ci.rasterizer_state.front_face = SDL_GPU_FRONTFACE_COUNTER_CLOCKWISE;
+			ci.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+			SDL_GPUColorTargetDescription ctd = { .format = (SDL_GPUTextureFormat)u->vfmt };
+			ci.target_info.num_color_targets = 1; ci.target_info.color_target_descriptions = &ctd;
+			pipes[fi] = SDL_CreateGPUGraphicsPipeline(gpu(), &ci);
+		}
+		if (raw && fi >= 0 && pipes[fi]) {
+			SDL_GPUCopyPass *cp = SDL_BeginGPUCopyPass(cmd);
+			SDL_GPUTextureLocation sl = { .texture = src }, dl = { .texture = raw };
+			SDL_CopyGPUTextureToTexture(cp, &sl, &dl, w, h, 1, false);
+			SDL_EndGPUCopyPass(cp);
+			SDL_GPUColorTargetInfo gct = { .texture = dst, .load_op = SDL_GPU_LOADOP_DONT_CARE, .store_op = SDL_GPU_STOREOP_STORE };
+			SDL_GPURenderPass *grp = SDL_BeginGPURenderPass(cmd, &gct, 1, 0);
+			SDL_BindGPUGraphicsPipeline(grp, pipes[fi]);
+			SDL_GPUTextureSamplerBinding gb = { raw, nearest_sampler() }; SDL_BindGPUFragmentSamplers(grp, 0, &gb, 1);
+			SDL_PushGPUFragmentUniformData(cmd, 0, u, sizeof *u);
+			SDL_DrawGPUPrimitives(grp, 3, 1, 0, 0);
+			SDL_EndGPURenderPass(grp);
+			return;
+		}
+	}
 	SDL_GPUColorTargetInfo ct = { .texture = dst, .load_op = SDL_GPU_LOADOP_DONT_CARE, .store_op = SDL_GPU_STOREOP_STORE };
 	SDL_GPURenderPass *rp = SDL_BeginGPURenderPass(cmd, &ct, 1, 0);
 	int baked; SDL_BindGPUGraphicsPipeline(rp, view_pipeline_for(from_depth, u, &baked));   /* RECOMP_GPU_VIEW_FAST: a per-view baked pipeline (no uniform buffer -- u is baked into it) or the general one at u's format */
@@ -4504,6 +4546,8 @@ static void gfx_check_draw(const GfxDraw *d, TargetEntry *e, int has_depth, cons
 	static int full_done; int full = ndiff && !full_done && (want_fp < 0 || (uint32_t)want_fp == d->fprog);
 	if (full) full_done = full_reported = 1;
 	if (ndiff && !full && gfx_check_reported++ >= 0) {   /* the rest: one line per divergent draw */
+		{ double ga[3] = {0}, sa_[3] = {0}; int cnt = 0; for (int y = y0; y <= y1; y += 3) for (int x = x0; x <= x1; x += 3) { const uint8_t *q = gpu_rgba + 4 * (y * e->width + x), *r = soft_rgba + 4 * (y * e->width + x); for (int k = 0; k < 3; k++) { ga[k] += q[k]; sa_[k] += r[k]; } cnt++; }
+		  if (cnt) fprintf(stderr, "    avg gpu %.0f %.0f %.0f soft %.0f %.0f %.0f\n", ga[0]/cnt, ga[1]/cnt, ga[2]/cnt, sa_[0]/cnt, sa_[1]/cnt, sa_[2]/cnt); }
 		const GfxTexture *t0 = d->tex[0].data ? &d->tex[0] : 0;
 		fprintf(stderr, "RECOMP_GFX_CHECK: also divergent -- vprog=%#x fprog=%#x target=%#x fmt=%#x blend=%d depth=%u/%d  %d px, bbox (%d,%d)-(%d,%d)  tex0 %s%#x\n",
 		        d->vprog, d->fprog, e->addr, e->format, d->blend.present, d->depth_func, d->depth_write, ndiff, x0, y0, x1, y1,
@@ -5613,6 +5657,7 @@ void gfx_gpu_draw(const GfxDraw *d) {
 		for (int i = 0; i < ntold; i++) if (told[i] == h) seen = 1;
 		if (!seen && ntold < 64) { told[ntold++] = h; fprintf(stderr, "    gpu: fragment %#x reads the framebuffer and %s blending, no copy\n", d->fprog, what[g_fzero_draw]); }
 	}
+	view_cur_fprog = d->fprog;
 	ShaderEntry *fs = get_shader(d->fprog, fp, vp, vl, fl, sa_for_smp, scene_entry->kind, cube_mask, snap_mask, 0, 0);
 	{	/* RECOMP_GXM_PATCHER_LOG=1: each fragment program's first draw, against when the game's shader patcher made it (hooks.c gxm_fp_create) */
 		static int on = -1; if (on < 0) on = getenv("RECOMP_GXM_PATCHER_LOG") != 0;
@@ -5635,7 +5680,7 @@ void gfx_gpu_draw(const GfxDraw *d) {
 		if (skip_lossless()) { async_skip(d, "a shader is being built"); return; }
 		if (!gpu_overlap()) { if (vs) build_wait(&vs->pending); if (fs) build_wait(&fs->pending); }   /* (gpu_overlap: the flush waits) */
 	}
-	if (!vs || !fs || (!shader_pending(vs) && !vs->ok) || (!shader_pending(fs) && !fs->ok)) { soft_fallback(d, "program not translated"); return; }   /* translator doesn't cover this pair yet */
+	if (!vs || !fs || (!shader_pending(vs) && !vs->ok) || (!shader_pending(fs) && !fs->ok)) { { static int skip = -1; if (skip < 0) skip = getenv("RECOMP_SKIP_UNTRANSLATED") != 0; if (skip) return; } soft_fallback(d, "program not translated"); return; }   /* translator doesn't cover this pair yet */
 	/* the pipeline, before anything below touches the rings or the targets: a draw whose pipeline is still being built is skipped whole */
 	/* ds_format 0 (an old capture, or a surface we never saw ourselves): both planes present, as before */
 	int ds_depth_ok = !scene_target.ds_data || (scene_target.ds_format & 0x00044000u) != 0;
@@ -5669,7 +5714,7 @@ void gfx_gpu_draw(const GfxDraw *d) {
 			GfxTarget tg = target_entry_as_gfx(x); uint32_t b = (uint32_t)gfx_target_bpp(&tg);
 			if (ptr >= x->addr && ptr < x->addr + b * x->width * x->height && (!te || x->gen > te->gen)) { te = x; bpp = b; }
 		}
-		if (!te || te == scene_entry || !((te->kind == TK_F16 && bpp == 8) || (te->kind == TK_U8 && bpp == 4))) { soft_fallback(d, "fragment LDST outside a GPU colour target"); return; }
+		if (!te || te == scene_entry || !((te->kind == TK_F16 && bpp == 8) || (te->kind == TK_U8 && bpp == 4))) { static int lg; if (lg++ < 24) fprintf(stderr, "    ldst-out: fs %#x vs %#x k %d sa %d ptr %#x te %#x kind %d bpp %u %ux%u scene %d | words %08x %08x %08x %08x\n", fs->addr, vs ? vs->addr : 0, k, fs->ldst_sa[k], ptr, te ? te->addr : 0, te ? te->kind : -1, bpp, te ? te->width : 0, te ? te->height : 0, te == scene_entry, RD32(ptr), RD32(ptr + 4), RD32(ptr + 8), RD32(ptr + 12)); } { soft_fallback(d, "fragment LDST outside a GPU colour target"); return; }
 		ldst_te[k] = te;
 		ldst_win[k][0] = te->addr; ldst_win[k][1] = bpp * te->width * te->height; ldst_win[k][2] = bpp * te->width; ldst_win[k][3] = (te->kind == TK_F16 ? 1u : 0u) | bpp << 8;
 	}

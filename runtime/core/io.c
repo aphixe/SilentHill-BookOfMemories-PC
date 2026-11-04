@@ -127,6 +127,9 @@ static void addcont_marker(const char *gp, const char *hp) {
 	}
 }
 static void h_io_open(Cpu *c) {   /* (path, SCE_O_* flags, mode) -> fd */
+	/* RECOMP_IO_OPEN_DELAY_MS (a game's RUN_ENV): each open takes this long, for a game whose threads rely on a console's load
+	 * times (Silent Hill: Book of Memories: 'fx\dfx_spark.tga': Error loading file, entering its first zone) */
+	{ static int ms = -1; if (ms < 0) { const char *e = getenv("RECOMP_IO_OPEN_DELAY_MS"); ms = e ? atoi(e) : 0; } if (ms > 0) usleep((useconds_t)ms * 1000); }
 	/* the console's TTYs (the C library's stdin/stdout/stderr): the host's standard streams */
 	const char *gp = (char *)G(A0);
 	if (!strncmp(gp, "tty", 3) && gp[3] >= '0' && gp[3] <= '9' && gp[4] == ':') { RET(io_guest_fd(dup(gp[3] == '0' && (A1 & 3) == 1 ? 0 : gp[3] == '0' ? 1 : 2))); return; }

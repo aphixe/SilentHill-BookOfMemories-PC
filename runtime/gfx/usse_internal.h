@@ -27,7 +27,7 @@ typedef struct {
 enum {
 	OP_NOP = 0, OP_VMAD2, OP_VNMAD, OP_VMAD, OP_VDP, OP_VDUAL, OP_VCOMP, OP_VMOV, OP_VPCK, OP_VTST, OP_VTSTMSK,
 	OP_VBW, OP_SOP2, OP_SOP2M, OP_SOP3, OP_I8MAD, OP_I16MAD, OP_I32MAD, OP_I32MAD2, OP_SMP, OP_BR,
-	OP_SMLSI, OP_SMBO, OP_KILL, OP_LIMM, OP_DEPTHF, OP_LDST, OP_UNSUPPORTED
+	OP_SMLSI, OP_SMBO, OP_KILL, OP_LIMM, OP_DEPTHF, OP_LDST, OP_RET, OP_UNSUPPORTED
 };
 /* repeat modes (§2.12) */
 enum { RM_EXTERNAL, RM_INTERNAL, RM_BOTH, RM_SLMSI };
@@ -48,6 +48,16 @@ typedef struct {
 
 /* FPCONSTANT ROM (§2.7): 64 entries, (low word, high word); a translator can emit these as plain
  * SPIR-V constants (the ROM is fixed, not draw state) instead of modelling the bank at all. */
+/* A subroutine sits at the start of a program: code from instruction 0 to a return, reached by linked branches to 0 from the
+ * main code, which starts after that return. The index the program begins at (0 for one without such calls). */
+static inline int usse_entry(const UOp *code, int n) {
+	int ret = -1;
+	for (int i = 0; i < n; i++) {
+		if (code[i].op == OP_RET) ret = i;
+		else if (code[i].op == OP_BR && code[i].args[0] && i + code[i].imm == 0 && ret >= 0) return ret + 1;
+	}
+	return 0;
+}
 static const uint32_t usse_fpconst[64][2] = {
 	{0x00000000,0x00000000},{0x00000000,0x3F800000},{0x3F800000,0x00000000},{0x3F800000,0x3F800000},
 	{0x40000000,0x40800000},{0x41000000,0x41800000},{0x42000000,0x42800000},{0x43000000,0x43800000},

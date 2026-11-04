@@ -1,146 +1,128 @@
-<p align="center"><img src="assets/brand/banner.svg" alt="Project Nativ: your PS Vita games, rebuilt natively" width="720"></p>
+# Silent Hill: Book of Memories for PC
 
-# Project Nativ
+An unofficial native Windows port of the PS Vita game *Silent Hill: Book of Memories*, built with
+[Project Nativ](https://github.com/TheLostPantheon/nativ). The game's code is recompiled into a Windows program on your
+own machine, from your own copy of the game.
 
-Project Nativ turns PS Vita games into native programs for macOS, Linux and Windows. You bring your own copy of a
-game. The tools recompile it on your machine, and it runs like any other program, with extras the Vita never had:
-higher resolutions, wider screens, 60 fps and mouse aiming, depending on the game.
+**This repository contains no game files, game code or firmware, and neither do its releases.** You need your own copy of
+the game. Setup never downloads it for you.
 
-## How it works
+## Status
 
-A Vita game is ARM code written against Sony's system software. Nativ handles the two separately.
+This is an early port, tested on one Windows PC. The game runs from the menus into gameplay, with sound, saves, controller
+support and keyboard and mouse controls. Expect bugs and possible crashes, and keep a copy of your saves.
 
-- **The game's code is recompiled.** A static recompiler translates the game's ARMv7 code, Thumb-2, VFP and NEON
-  included, into C once, ahead of time. That C is compiled into a native program.
-- **The system underneath is rebuilt.** Sony's own libraries that a game loads, such as libgxm, libc and FIOS, are
-  recompiled with it from your firmware. Below them, a runtime stands in for the Vita's kernel and hardware: it runs
-  the game's threads, draws its graphics on your GPU and plays its sound.
+| Works | Details |
+|---|---|
+| Graphics | Deferred lighting, UI and depth, drawn on your GPU with Vulkan |
+| Resolution | Gameplay 3D renders at full 4K, not stretched from the Vita's resolution |
+| Fullscreen | Alt+Enter uses your display's resolution and keeps the game's aspect ratio |
+| Controls | Keyboard and mouse, and controllers |
 
-[How it works](docs/architecture.md) goes into the design.
+Known problems:
 
-## Nothing of the game ships
+- Very bright surfaces, like faces under strong light, can show small teal flecks.
+- Small dark patches may appear in some blood decals and shadows.
+- Text entry through the Vita's on-screen keyboard is not implemented.
+- Multiplayer is not implemented.
+- Long play sessions have had little testing.
 
-This repository holds no game code, game data or firmware, and nothing we distribute ever will. You supply your own
-copy of each game and Sony's firmware update file, and the tools decrypt and recompile them on your machine.
+## What you need
 
-## Supported games
+- 64-bit Windows 10 or 11 and a GPU with Vulkan drivers
+- About 5 GB of free disk space
+- **Your copy of the game**: the US release, title ID `PCSE00011`, version 1.00, as a folder copied from `ux0:app/PCSE00011`
+  on your Vita. Its folder holds `eboot.bin`. Other regions and versions are refused, because the port's patches are made for
+  this exact build (SHA-256 of its main program:
+  `4693b338434d8f7fdd913002672f530a145eab1ecda6bd1eae68668465d3fc5c`).
+- **Sony's Vita firmware**, either of:
+  - the firmware update file (`PSP2UPDAT.PUP` or `PSVUPDAT.PUP`) from Sony's PS Vita system software update page
+  - a [Vita3K](https://github.com/Vita3K/Vita3K) folder with the firmware installed
 
-| Game | Release | Title ID | Versions |
-|---|---|---|---|
-| Killzone: Mercenary | US | PCSA00107 | 1.00, 1.12 (recommended: Botzone and online play) |
-| Uncharted: Golden Abyss | US | PCSA00029 | 1.00 |
-| Unit 13 | US | PCSA00014 | 1.00 |
-| Shovel Knight | US | PCSE00640 | 1.00 |
+## Install
 
-Each game's pack supports exact releases, recognised by the SHA-256 of the game's main program. Game-specific fixes,
-such as Killzone's physics fix or the widescreen cameras, patch code at fixed addresses, so they only fit the build
-they were written for. Your game data doesn't need to match; the main program does.
+1. Download `SilentHillBoM-PC-<version>.zip` from the Releases page and unpack it somewhere with enough space. Or clone this
+   repository.
+2. Run `releases\Setup.bat`.
+3. Choose your firmware and game folder when asked.
+4. Wait for the build, which takes several minutes. Then use the new desktop shortcut.
 
-Not supported yet: other regions (EU, JP, Asia) and the later updates of Uncharted (1.03), Unit 13 (1.01) and Shovel
-Knight (1.08, Treasure Trove). The launcher recognises them and tells you which release it supports. It keeps an
-unsupported update, and the game runs without it. Porting a new release starts with `dev/hookmap.py`, which carried
-43 of Killzone 1.12's 46 hooks over from 1.00 by matching code.
+Windows may warn about running a downloaded script, since it isn't signed. You can read
+[`releases/setup.ps1`](releases/setup.ps1) first.
 
-## Getting started
+Setup does the following, all inside the folder you unpacked:
 
-**Players** use the launcher. It walks you through first-run setup, then builds and starts your games. Build it with
-`launcher/build.sh`; the result is `launcher/nativ`.
+1. Downloads the Project Nativ v0.1.5 Windows release from that project's GitHub page and checks its SHA-256. It takes only
+   Python, the compiler and SDL from it.
+2. Decrypts your firmware and game into `dump\`.
+3. Recompiles and builds the game.
+4. Adds default controls and a desktop shortcut, with an icon made from your copy's artwork.
 
-**Developers** can run each stage of the pipeline with `./vitarecomp` from the top of the checkout. Run it without
-arguments for the full list.
+After updating to a newer version, run `releases\Setup.bat` again. It rebuilds the game and keeps your saves and settings.
+Saves are in `dump\decrypted\PCSE00011\recomp\fs\savedata0`.
 
-On Windows, use the Python driver directly from PowerShell instead of the zsh wrapper:
+## Controls
 
-```powershell
-.\.venv\Scripts\python.exe .\pipeline\vitarecomp.py --help
+| Vita | Keyboard and mouse |
+|---|---|
+| Left stick | W A S D |
+| Cross | Space |
+| Circle | E |
+| Square | 1, or left mouse button |
+| Triangle | 2, or right mouse button |
+| L / R | Left Shift / G |
+| Start / Select | Tab / F |
+| D-pad | T V Q X (up, down, left, right) |
+| Touch screen | Hold Left Alt and use the mouse |
+
+In menus, the arrow keys move, Enter is Cross and Esc is Start.
+
+| Key | Action |
+|---|---|
+| Alt+Enter | Toggle fullscreen |
+| `-` and `=` (also keypad `-` and `+`) | Volume down and up. The level is remembered. |
+| F10 | In-game menu: settings and key bindings |
+| F1 | Performance display |
+| F2 | Change render scale |
+
+## Building from source
+
+The commands behind setup can be run by hand from the repository's top folder, once setup has installed the tools:
+
+```bash
+python/python.exe pipeline/vitarecomp.py build PCSE00011
 ```
 
-Replace `--help` with a stage and its arguments. The Windows player release includes its own Python and toolchain;
-the [developer guide](docs/developers.md#making-a-release) describes building that distribution on macOS or Linux.
+```bash
+python/python.exe pipeline/vitarecomp.py run PCSE00011
+```
 
-The main stages, in order:
+To build a release zip from the last commit, which also refuses to run if a tracked file looks like game data:
 
-| Command | What it does |
-|---|---|
-| `firmware <PUP>` | Decrypts Sony's firmware update file. |
-| `scan <folder>` | Finds games, updates and firmware files in a folder, at any depth. |
-| `add <copy>` | Adds a game or its update. `import` takes one that's already decrypted. |
-| `analyze <title>` | Finds the game's functions. |
-| `recompile <title>` | Translates them to C. |
-| `build <title>` | Compiles the game. |
-| `run <title>` | Plays it. |
-| `check <titles>` | Runs the regression gate. |
+```bash
+python/python.exe releases/build_release.py v0.1.0
+```
 
-The pipeline's Python needs the packages in `requirements.txt`, installed in `.venv` at the top of the checkout.
-The Windows player release includes its Python in `python/`.
+[`CHANGES.md`](CHANGES.md) lists what differs from Project Nativ. [`docs/NATIV-README.md`](docs/NATIV-README.md) is
+Project Nativ's own README, and some of its links point to documents that are only in
+[its repository](https://github.com/TheLostPantheon/nativ). The GLSL sources for the shader tables this port changed are in
+[`dev/sh-bom/shaders`](dev/sh-bom/shaders).
 
-### Your library
+The [`.gitignore`](.gitignore) keeps your game files, firmware, licences, generated code, builds and saves out of git, so a
+clone can be set up and played in place. Please don't commit or share any of them.
 
-Your games, firmware, licences, builds and saves live in one library folder:
+## Legal
 
-- `dump/` inside a checkout, which git ignores;
-- otherwise your per-user data folder: `~/Library/Application Support/ProjectNativ/Nativ/library` on macOS, under
-  `~/.local/share` on Linux and under `%LOCALAPPDATA%` on Windows;
-- or wherever `ATIV_DUMP` points.
+This is an unofficial fan project, not affiliated with or endorsed by Konami, Sony or the game's developers. *Silent Hill* is
+a trademark of Konami. Use this only with a copy of the game you own.
 
-### Installing
+This port is based on Project Nativ and is free software under the GNU General Public License, version 2 or (at your option)
+any later version: see [`LICENSE`](LICENSE). Third-party code keeps its own licence: see
+[`THIRD_PARTY.md`](THIRD_PARTY.md).
 
-`./vitarecomp dist <folder>` writes an install that holds only what ships. Running it again over an install it wrote
-updates the program and leaves your library alone. Two scripts add what a player's machine lacks:
+## Credits
 
-- **Linux:** `dev/linux-install.sh <folder>` adds its own compiler and Python, for machines like the Steam Deck that
-  have neither.
-- **macOS:** `dev/macos-install.sh <folder>` adds SDL, SPIRV-Cross, FFmpeg's H.264 decoder and Python, and a
-  `Project Nativ.app` to start it. The player needs only Apple's Command Line Tools, which the app offers to install.
-  Build the libraries once with `runtime/platform/macos/setup-toolchain.sh`.
+- [Project Nativ](https://github.com/TheLostPantheon/nativ) for the recompiler, runtime and tools
+- [Vita3K](https://github.com/Vita3K/Vita3K), used as a reference for Vita behaviour
 
-The [player guide](docs/player-guide.md) covers the rest from the player's side: first run, controls, online play and
-reporting a bug.
-
-## Repository layout
-
-| Folder | What's in it |
-|---|---|
-| `launcher/` | The launcher (`hub.cpp`): your library, first-run setup and settings. It runs the pipeline for you. |
-| `pipeline/` | The `vitarecomp` driver, plus game and licence handling. |
-| `recompiler/` | The static recompiler, its runtime header `rt.h`, and seeds for functions the analysis misses. |
-| `runtime/` | What a recompiled game runs on: `core/` (kernel and libraries), `gfx/` (graphics), `audio/`, `media/`, `input/`, `net/` (networking and online play), `ui/` (window and in-game menu), `platform/`, `debug/` and `tests/`. `build.py` builds it. |
-| `packs/<title>/` | One folder per game: `pack.toml` (versions, modules, hooks and settings), `hooks.c` (that game's code patches) and `shaders.txt` (its shader recipes). |
-| `decrypt/` | Decrypting firmware updates and game packages, converting SELF to ELF, and the table of Sony's function names. |
-| `servers/` | Killzone's login server stand-in (`kzserver/`) and the relay node for online play (`nativ-node/`). |
-| `dev/` | Developer tools: replays, diffs and bisects, the remote gate, tests and firmware research. |
-| `third_party/` | Dear ImGui, stb, LibAtrac9, Monocypher and the HE-VAG tables, each with its licence. |
-| `docs/` | The documentation listed below. |
-| `notes/` | Project notes, such as the checklist before this repository goes public. |
-| `assets/brand/` | The logo, wordmark and app icons, all drawn from one geometry by `make.py`. |
-
-## Documentation
-
-- [Player guide](docs/player-guide.md): installing, first run, controls, online play, known issues and bug reports.
-- [How it works](docs/architecture.md): the design, layer by layer.
-- [Working on Nativ](docs/developers.md): the pipeline, packs and versions, and working across machines.
-- [The runtime in detail](docs/runtime.md): display timing, audio, the GPU backend, controls, hooks and metrics.
-- [Verification](docs/verification.md): the regression gate and how the translation and renderer are checked.
-- [Debugging a game](docs/debugging.md): logs, captures, replays and the renderer's switches.
-- [Online play](docs/online.md): matchmaking, finding other players, and the encrypted links between them.
-- [The shader compiler](docs/shader-compiler.md) and [the USSE instruction set](docs/usse-isa.md): the Vita's GPU
-  shaders and how we translate them.
-
-## Licence
-
-Project Nativ is free software under the GNU General Public License, version 2 or (at your option) any later version:
-see [LICENSE](LICENSE). Third-party code keeps its own licence, and [THIRD_PARTY.md](THIRD_PARTY.md) lists it with
-the projects parts of Nativ are ported from.
-
-Nativ contains no Sony or game code. You supply your own games and the firmware from Sony's site; the games are
-recompiled on your machine and never leave it.
-
-## AI disclaimer
-
-Nativ is made with the help of AI tools: much of its code and documentation was written with AI assistance, under its
-developer's direction, and tested on the games themselves.
-
-## Supporting Nativ
-
-Nativ is free, and everything in it is for everyone. If you'd like to support its development, you can leave a tip on
-[Ko-fi](https://ko-fi.com/kingtorro).
+Much of this port's code and documentation was written with AI assistance.

@@ -1,0 +1,51 @@
+# Everything in this repository is source. Anything that came from a game, Sony's firmware or a build stays on the
+# player's machine: never commit it.
+
+# The player's library: game files, firmware, licences, generated code, builds, saves, logs
+/dump/
+
+# Installed by releases/Setup.bat from the upstream Project Nativ release
+/python/
+/toolchain/
+/SDL3.dll
+/Project Nativ.exe
+/.nativ-dist
+/.nativ-files
+
+# Made by setup or the release script
+/releases/out/
+/*.lnk
+/*.ico
+
+# Python and compiler leftovers
+__pycache__/
+*.pyc
+*.o
+*.obj
+obj_win/
+
+# A second net: game, firmware and licence files, wherever they turn up
+eboot.bin
+eboot.bin.elf
+param.sfo
+work.bin
+*.rif
+*.pod
+*.suprx
+*.skprx
+*.self
+*.elf
+*.pup
+*.PUP
+*.pkg
+*.vpk
+
+# Generated from a game: recompiled code, memory images, captures, frame dumps, saves
+game_part*.c
+mod_lib*.c
+mod_lib*.h
+*.img
+*.vfc
+*.ppm
+savedata*/
+session*.log

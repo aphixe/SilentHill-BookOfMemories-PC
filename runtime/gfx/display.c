@@ -859,6 +859,9 @@ static void h_touch_panel_info(Cpu *c) {   /* front panel 0..1919 x 0..1087; bac
 }
 /* sceDisplayGetRefreshRate(float *): the panel's nominal rate, 59.94 Hz, as the SDK reports it (a
  * theoretical value; the host's vblank grid above runs at 60) */
+/* sceDisplayGetVcount: the vblank counter (16 bits on the console). Silent Hill: Book of Memories paces with
+ * `do WaitVblankStart while (GetVcount == last)`: a stub's constant 0 never lets it out */
+static void h_get_vcount(Cpu *c) { RET((uint32_t)(vb_now() & 0xffff)); }
 static void h_refresh_rate(Cpu *c) { if (!A0) { RET(0x80290002u); return; } float hz = 59.94f; memcpy(G(A0), &hz, 4); RET(0); }   /* no pointer: SCE_DISPLAY_ERROR_INVALID_ADDR */
 /* sceCtrlSetSamplingMode(mode): 0 digital, 1 analog, 2 analog wide; returns the PREVIOUS mode (the
  * console starts digital). The sticks are reported either way -- a game that left the pad digital
@@ -967,7 +970,7 @@ const HleEntry hle_display[] = {
 	 * PS TV, which has no touch screen, and it never created its touch recognizers (no menu answered a tap) */
 	{"sceCtrlReadBufferPositive2", h_ctrl_read2}, {"sceCtrlPeekBufferPositive2", h_ctrl_peek2},
 	{"sceAudioOutGetAdopt", h_audio_adopt},   /* (port type): 1, the type can be opened -- only voice chat or the system's music takes one */
-	{"sceDisplayGetRefreshRate", h_refresh_rate},
+	{"sceDisplayGetRefreshRate", h_refresh_rate}, {"sceDisplayGetVcount", h_get_vcount},
 	{"sceCtrlSetSamplingMode", h_ctrl_mode}, {"sceCtrlSetSamplingModeExt", h_ctrl_mode}, {"sceTouchSetSamplingState", h_touch_sampling},
 	{"sceMotionStartSampling", h_motion_start}, {"sceMotionStopSampling", h_motion_stop}, {"sceMotionGetState", h_motion_state},
 	{"sceMotionGetBasicOrientation", h_motion_basic}, {"sceMotionReset", h_motion_reset}, {"sceMotionSetDeadband", h_input_ok}, {"sceMotionSetTiltCorrection", h_input_ok},

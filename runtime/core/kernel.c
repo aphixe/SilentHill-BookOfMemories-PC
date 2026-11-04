@@ -441,7 +441,7 @@ static int priority_of(uint32_t p) {
 	if (v < 1) v = 1; if (v > 255) v = 255;   /* out of range is an error on the firmware; keep the thread runnable here (no scheduler applies it) */
 	return v;
 }
-static void h_get_thread_id(Cpu *c) { RET(cur_tid); }
+static void h_get_thread_id(Cpu *c) { if (!cur_thread && !main_thread.cpu) main_thread.cpu = c; RET(cur_tid); }
 #define PROCESS_ID 0x40000005u   /* the one process: its uid, as GetThreadInfo reports it too (libfios2 asks for it) */
 static void h_get_process_id(Cpu *c) { RET(PROCESS_ID); }
 
@@ -700,8 +700,32 @@ static void h_thread_affinity(Cpu *c) { Thread *t = thread_of(A0); if (!t) { RET
 static void h_change_affinity(Cpu *c) { Thread *t = thread_of(A0); if (!t) { RET(E_UNKNOWN_THREAD_ID); return; } RET(0); sched_set_affinity(t, A1); }   /* the scheduler applies it (RECOMP_SCHED=vita) */
 static void h_zero_ok(Cpu *c) { RET(0); }   /* ChangeThreadVfpException, CloseSema/CloseMutex: nothing to apply */
 static void h_exit_process(Cpu *c) { fprintf(stderr, "process exited (sceKernelExitProcess %#x)\n", A0); fflush(stderr); exit(0); }
+/* RECOMP_HANG_DUMP=seconds[,every]: every thread's guest registers and the code addresses on its stack, to the log (a porting aid) */
+static void *hang_dump(void *arg) {
+	const char *e = getenv("RECOMP_HANG_DUMP"); int first = atoi(e), every = strchr(e, ',') ? atoi(strchr(e, ',') + 1) : 0;
+	usleep((useconds_t)first * 1000000u);
+	for (;;) {
+		fprintf(stderr, "=== thread dump\n");
+		for (int i = -1; i < nthreads; i++) { Thread *t = i < 0 ? &main_thread : &threads[i]; if (!t->cpu || t->done) continue;
+			uint32_t s = t->cpu->r[13]; fprintf(stderr, "T '%s' %x wait %x/%x sp %#x lr %#x r0-r3 %x %x %x %x:", t->name, t->uid, t->wait_type, t->wait_id, s, t->cpu->r[14], t->cpu->r[0], t->cpu->r[1], t->cpu->r[2], t->cpu->r[3]);
+			int k = 0; for (uint32_t off = 0; off < 0x2000 && k < 40 && (i < 0 || s + off < t->stack + t->stack_size); off += 4) { uint32_t v = *(uint32_t *)G(s + off); if ((v >= 0x81000000 && v < 0x816a0000) || (v >= 0x88000000 && v < 0x8e000000)) { fprintf(stderr, " %x", v); k++; } }
+			fprintf(stderr, "\n"); }
+		fflush(stderr);
+		if (!every) return 0;
+		usleep((useconds_t)every * 1000000u);
+	}
+}
+__attribute__((constructor)) static void hang_dump_start(void) { if (getenv("RECOMP_HANG_DUMP")) { pthread_t th; pthread_create(&th, 0, hang_dump, 0); pthread_detach(th); } }
 static void h_abort_handler(Cpu *c) {   /* libc's abort() ends here; a stub that returned let the program run on past its own abort */
 	fprintf(stderr, "abort (sceKernelCallAbortHandler from lr %#x); last formatted string: %s\n", c->r[14], hle_last_format);
+	{ /* the guest stack's code addresses: what called the abort (a porting aid) */
+		uint32_t sp = c->r[13]; if (getenv("RECOMP_ABORT_DUMP")) { FILE *df = fopen(getenv("RECOMP_ABORT_DUMP"), "wb"); if (df) { fwrite(G(0x10000000), 1, 0x4000000, df); fclose(df); } } fprintf(stderr, "abort regs r0-r12:"); for (int i = 0; i < 13; i++) fprintf(stderr, " %x", c->r[i]); fprintf(stderr, "\nabort sp %#x:\n", sp);
+		int shown = 0; for (uint32_t off = 0; off < 0x8000 && shown < 160; off += 4) { uint32_t v = *(uint32_t *)G(sp + off); if ((v >= 0x81000000 && v < 0x816a0000) || (v >= 0x88000000 && v < 0x8d000000)) { fprintf(stderr, "  sp+%#x: %#x\n", off, v); shown++; } }
+		for (int i = 0; i < nthreads; i++) { Thread *t = &threads[i]; if (!t->cpu || t->done || t->cpu == c) continue;
+			uint32_t s = t->cpu->r[13]; fprintf(stderr, "thread '%s' %x sp %#x lr %#x r0-r3 %x %x %x %x:", t->name, t->uid, s, t->cpu->r[14], t->cpu->r[0], t->cpu->r[1], t->cpu->r[2], t->cpu->r[3]);
+			int k = 0; for (uint32_t off = 0; off < 0x800 && k < 24 && s + off < t->stack + t->stack_size; off += 4) { uint32_t v = *(uint32_t *)G(s + off); if ((v >= 0x81000000 && v < 0x816a0000) || (v >= 0x88000000 && v < 0x8d000000)) { fprintf(stderr, " %x", v); k++; } }
+			fprintf(stderr, "\n"); }
+	}
 	fflush(stderr); exit(1);
 }
 
@@ -1802,7 +1826,7 @@ const HleEntry hle_kernel[] = {
 	{"sceKernelWaitThreadEnd", h_wait_thread_end}, {"sceKernelWaitThreadEndCB", h_wait_thread_end_cb},
 	{"sceKernelGetThreadExitStatus", h_thread_exit_status}, {"sceKernelDeleteThread", h_delete_thread},
 	{"sceKernelDelayThread", h_delay}, {"sceKernelDelayThreadCB", h_delay_cb},
-	{"sceKernelGetThreadInfo", h_thread_info}, {"sceKernelGetThreadCurrentPriority", h_thread_current_priority},
+	{"sceKernelGetThreadInfo", h_thread_info}, {"sceKernelGetThreadCurrentPriority", h_thread_current_priority}, {"SceThreadmgr_01414F0B", h_thread_current_priority}, {"SceThreadmgr_0C8A38E1", h_exit_thread},
 	{"sceKernelChangeThreadPriority", h_change_priority}, {"sceKernelGetThreadCpuAffinityMask", h_thread_affinity},
 	{"sceKernelChangeThreadCpuAffinityMask", h_change_affinity}, {"sceKernelChangeThreadVfpException", h_zero_ok},
 	{"sceKernelRegisterThreadEventHandler", h_register_thread_event}, {"sceKernelUnregisterThreadEventHandler", h_unregister_thread_event},

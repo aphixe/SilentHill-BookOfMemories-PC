@@ -588,7 +588,7 @@ static int in_mult_set_g(int bank) { return bank == BK_TEMP || bank == BK_PA || 
 static int32_t slot_off(Gen *g, int mode, int bank, int r, const int mult[4], int slot, int *supported) {
 	int is_fpi = (bank == BK_FPI); (void)supported;
 	switch (mode) {
-	case RM_EXTERNAL: return is_fpi ? 0 : 4 * r;
+	case RM_EXTERNAL: return is_fpi ? r : 4 * r;   /* internal registers step one a repeat here too: Silent Hill: Book of Memories' lighting (VMAD rpt 2 to i1, then i1 and i2 read) */
 	case RM_INTERNAL: return is_fpi ? r : 0;
 	case RM_BOTH: return is_fpi ? r : 4 * r;
 	default: { int rr = r < 0 ? 0 : r > 16 ? 16 : r; int v = g->inc[slot & 3][rr]; return in_mult_set_g(bank) ? v * mult[slot & 3] : v; }
@@ -812,8 +812,10 @@ static void emit_vtstmsk(Gen *g, const UOp *op, int *ok) {
 /* VBW: bitwise op on one 32-bit (or, sub3, 16-bit) lane; the s2 rotate/invert is folded at
  * translate time when s2 is an immediate -- usse.c's exec_vbw */
 static void emit_vbw(Gen *g, const UOp *op, int *ok) {
-	Spv *s = &g->s;
-	uint32_t a = read_raw_comp(g, &op->s1, 0, 0, ok), b;
+	Spv *s = &g->s; static const int unit[4] = {1, 1, 1, 1};
+	for (int rep = 0; rep < op->reps; rep++) {
+	int off1 = slot_off(g, op->repmode, op->s1.bank, rep, unit, 1, ok), off2 = slot_off(g, op->repmode, op->s2.bank, rep, unit, 2, ok), offd = slot_off(g, op->repmode, op->dst.bank, rep, unit, 3, ok);
+	uint32_t a = read_raw_comp(g, &op->s1, off1, 0, ok), b;
 	int rot = op->args[0] & 31;
 	if (op->s2.bank == BK_IMM) {
 		uint32_t bi = (uint32_t)op->s2.num | ((uint32_t)op->imm << 7) | ((uint32_t)op->args[2] << 14);
@@ -821,7 +823,7 @@ static void emit_vbw(Gen *g, const UOp *op, int *ok) {
 		if (op->args[1]) bi = op->sub3 ? (~bi & 0xFFFFu) : ~bi;
 		b = c_uint(s, bi);
 	} else {
-		b = read_raw_comp(g, &op->s2, 0, 0, ok);
+		b = read_raw_comp(g, &op->s2, off2, 0, ok);
 		if (op->sub3) {
 			int r16 = rot & 15;
 			b = r16 ? uop2(s, SpvOpBitwiseAnd, uop2(s, SpvOpBitwiseOr, uop2(s, SpvOpShiftLeftLogical, b, c_uint(s, (uint32_t)r16)), uop2(s, SpvOpShiftRightLogical, b, c_uint(s, (uint32_t)(16 - r16)))), c_uint(s, 0xFFFF))
@@ -839,7 +841,8 @@ static void emit_vbw(Gen *g, const UOp *op, int *ok) {
 	default: r = a; break;
 	}
 	if (op->sub3) r = uop2(s, SpvOpBitwiseAnd, r, c_uint(s, 0xFFFF));
-	write_raw_comp(g, &op->dst, 0, 0, r, ok);
+	write_raw_comp(g, &op->dst, offd, 0, r, ok);
+	}
 }
 /* usse.c's test_lane_raw: zero/nonzero/negative/negative-or-zero of a raw lane of `type` */
 static uint32_t test_lane_spv(Spv *s, uint32_t raw, int type, int cmpsel) {
@@ -953,6 +956,83 @@ static void imad_offsets(Gen *g, const UOp *op, int r, int off[4], int *ok) {
  * whether I8MAD should see the full packed word is a question for it, not this port) */
 static uint32_t read_word(Gen *g, const UOperand *o, int off, int *ok) { return read_raw_comp(g, o, off, 0, ok); }
 static void write_word(Gen *g, const UOperand *o, int off, uint32_t v, int *ok) { write_raw_comp(g, o, off, 0, v, ok); }
+/* ---- SOP2 / SOP2M / SOP3: usse.c's exec_sop2/exec_sop2m/exec_sop3, the U8 RGBA sum of products, on floats as it does */
+static uint32_t sop_lane(Spv *s, uint32_t w, int k) { return fop2(s, SpvOpFDiv, result1(s, &s->func, SpvOpConvertUToF, t_float(s), ubits(s, w, 8 * k, 8)), c_float(s, 255.0f)); }
+static uint32_t sop_cop(Spv *s, int op, uint32_t x, uint32_t y) {
+	switch (op) { case 0: return fop2(s, SpvOpFAdd, x, y); case 1: return fop2(s, SpvOpFSub, x, y); case 2: return glsl2(s, 37 /*FMin*/, x, y); default: return glsl2(s, 40 /*FMax*/, x, y); }
+}
+static uint32_t sop_pack(Spv *s, const uint32_t v[4]) {
+	uint32_t r = c_uint(s, 0);
+	for (int k = 0; k < 4; k++) {
+		uint32_t cl = glsl2(s, 37, glsl2(s, 40, v[k], c_float(s, 0.0f)), c_float(s, 1.0f));
+		uint32_t u = result1(s, &s->func, SpvOpConvertFToU, t_uint(s), fop2(s, SpvOpFAdd, fop2(s, SpvOpFMul, cl, c_float(s, 255.0f)), c_float(s, 0.5f)));
+		r = uop2(s, SpvOpBitwiseOr, r, uop2(s, SpvOpShiftLeftLogical, u, c_uint(s, 8u * k)));
+	}
+	return r;
+}
+static uint32_t sop_comp(Spv *s, uint32_t v) { return fop2(s, SpvOpFSub, c_float(s, 1.0f), v); }
+static void emit_sop2(Gen *g, const UOp *op, int *ok) {
+	Spv *s = &g->s; uint32_t zero = c_float(s, 0.0f);
+	for (int r = 0; r < op->reps; r++) {
+		int off[4]; imad_offsets(g, op, r, off, ok);
+		uint32_t w1 = read_word(g, &op->s1, off[1], ok), w2 = read_word(g, &op->s2, off[2], ok);
+		if (!*ok) return;
+		uint32_t c1[4], c2[4]; for (int k = 0; k < 4; k++) { c1[k] = sop_lane(s, w1, k); c2[k] = sop_lane(s, w2, k); if (op->s1.negabs & 1) c1[k] = sop_comp(s, c1[k]); }
+		int csel1 = op->args[0] & 0xFF, cmod1 = op->args[0] & 0x100, csel2 = op->args[1] & 0xFF, cmod2 = op->args[1] & 0x100;
+		int asel1 = op->args[2] & 0xFF, amod1 = op->args[2] & 0x100, asel2 = op->args[3] & 0xFF, amod2 = op->args[3] & 0x100;
+		uint32_t out[4];
+		for (int k = 0; k < 3; k++) {
+			uint32_t f1 = csel1 == 1 ? c1[k] : csel1 == 2 ? c2[k] : csel1 == 3 ? c1[3] : csel1 == 4 ? c2[3] : zero;
+			uint32_t f2 = csel2 == 1 ? c1[k] : csel2 == 2 ? c2[k] : csel2 == 3 ? c1[3] : csel2 == 4 ? c2[3] : zero;
+			if (cmod1) f1 = sop_comp(s, f1);
+			if (cmod2) f2 = sop_comp(s, f2);
+			out[k] = sop_cop(s, op->sub, fop2(s, SpvOpFMul, f1, c1[k]), fop2(s, SpvOpFMul, f2, c2[k]));
+		}
+		uint32_t a1 = asel1 == 1 ? c1[3] : asel1 == 2 ? c2[3] : zero, a2 = asel2 == 1 ? c1[3] : asel2 == 2 ? c2[3] : zero;
+		if (amod1) a1 = sop_comp(s, a1);
+		if (amod2) a2 = sop_comp(s, a2);
+		out[3] = sop_cop(s, op->sub2, fop2(s, SpvOpFMul, a1, c1[3]), fop2(s, SpvOpFMul, a2, c2[3]));
+		write_word(g, &op->dst, off[3], sop_pack(s, out), ok);
+	}
+}
+static void emit_sop2m(Gen *g, const UOp *op, int *ok) {
+	Spv *s = &g->s; uint32_t zero = c_float(s, 0.0f);
+	uint32_t w1 = read_word(g, &op->s1, 0, ok), w2 = read_word(g, &op->s2, 0, ok), old = read_word(g, &op->dst, 0, ok);
+	if (!*ok) return;
+	int sel1 = op->args[0] & 0xFF, mod1 = op->args[0] & 0x100, sel2 = op->args[1] & 0xFF, mod2 = op->args[1] & 0x100;
+	uint32_t a[4], b[4], t1[4], t2[4], res[4];
+	for (int k = 0; k < 4; k++) { a[k] = sop_lane(s, w1, k); b[k] = sop_lane(s, w2, k); }
+	for (int k = 0; k < 4; k++) {
+		uint32_t f1 = sel1 == 2 ? a[k] : sel1 == 3 ? a[3] : sel1 == 6 ? b[k] : sel1 == 7 ? b[3] : zero;
+		uint32_t f2 = sel2 == 2 ? a[k] : sel2 == 3 ? a[3] : sel2 == 6 ? b[k] : sel2 == 7 ? b[3] : zero;
+		if (mod1) f1 = sop_comp(s, f1);
+		if (mod2) f2 = sop_comp(s, f2);
+		t1[k] = fop2(s, SpvOpFMul, f1, a[k]); t2[k] = fop2(s, SpvOpFMul, f2, b[k]);
+	}
+	for (int k = 0; k < 4; k++) res[k] = (op->mask & (1 << k)) ? sop_cop(s, k < 3 ? op->sub : op->sub2, t1[k], t2[k]) : sop_lane(s, old, k);
+	write_word(g, &op->dst, 0, sop_pack(s, res), ok);
+}
+static void emit_sop3(Gen *g, const UOp *op, int *ok) {
+	Spv *s = &g->s; uint32_t zero = c_float(s, 0.0f);
+	uint32_t w0 = read_word(g, &op->s0, 0, ok), w1 = read_word(g, &op->s1, 0, ok), w2 = read_word(g, &op->s2, 0, ok);
+	if (!*ok) return;
+	uint32_t c0[4], c1[4], c2[4]; for (int k = 0; k < 4; k++) { c0[k] = sop_lane(s, w0, k); c1[k] = sop_lane(s, w1, k); c2[k] = sop_lane(s, w2, k); }
+	int csel1 = op->args[0] & 0xFF, cmod1 = op->args[0] & 0x100, csel2 = op->args[1] & 0xFF, cmod2 = op->args[1] & 0x100, asel1 = op->args[2] & 0xFF, amod1 = op->args[2] & 0x100;
+	uint32_t out[4];
+	for (int k = 0; k < 3; k++) {
+		uint32_t f1 = csel1 == 2 ? c1[k] : csel1 == 3 ? c1[3] : csel1 == 4 ? c0[k] : csel1 == 5 ? c0[3] : csel1 == 6 ? c2[k] : csel1 == 7 ? c2[3] : zero;
+		uint32_t f2 = csel2 == 2 ? c1[k] : csel2 == 3 ? c1[3] : csel2 == 4 ? c0[k] : csel2 == 5 ? c0[3] : csel2 == 6 ? c2[k] : csel2 == 7 ? c2[3] : zero;
+		if (cmod1) f1 = sop_comp(s, f1);
+		if (cmod2) f2 = sop_comp(s, f2);
+		out[k] = sop_cop(s, op->sub, fop2(s, SpvOpFMul, f1, c1[k]), fop2(s, SpvOpFMul, f2, c2[k]));
+	}
+	uint32_t a1 = asel1 == 1 ? c0[3] : asel1 == 2 ? c1[3] : asel1 == 3 ? c2[3] : zero;
+	uint32_t a2 = csel2 == 2 || csel2 == 3 ? c1[3] : csel2 == 4 || csel2 == 5 ? c0[3] : csel2 == 6 || csel2 == 7 ? c2[3] : zero;
+	if (amod1) a1 = sop_comp(s, a1);
+	if (cmod2) a2 = sop_comp(s, a2);
+	out[3] = sop_cop(s, op->sub2, fop2(s, SpvOpFMul, a1, c1[3]), fop2(s, SpvOpFMul, a2, c2[3]));
+	write_word(g, &op->dst, 0, sop_pack(s, out), ok);
+}
 static void emit_i8mad(Gen *g, const UOp *op, int *ok) {
 	Spv *s = &g->s;
 	for (int r = 0; r < op->reps; r++) {
@@ -1126,10 +1206,34 @@ static uint32_t cube_coord(Gen *g, uint32_t u, uint32_t v, uint32_t w3, uint32_t
 	return result3(s, &s->func, SpvOpCompositeConstruct, t_vec(s, tf, 3), su, sv, face);
 }
 static uint32_t sample_lod(Gen *g, int slot, int unit, uint32_t coord, int lod_mode, uint32_t lodv, const uint32_t *grad);   /* (below, with srgb_fixup) */
+static void emit_smp_at(Gen *g, const UOp *op, int unit, int slot, int *ok);
 static void emit_smp(Gen *g, const UOp *op, const uint32_t sa_tex_unit[256], int *ok) {
 	Spv *s = &g->s;
+	if (op->s1.bank != BK_IMM && op->s1.bank != BK_SA) {
+		uint32_t idx = read_raw_comp(g, &op->s1, 0, 0, ok);
+		if (!*ok) return;
+		int any = 0, want_cube = op->sub == 2;
+		for (int k = 0; k < 16; k++) {
+			int unit = (int)(sa_tex_unit[128 + k] & 0xFF), slot = unit < 16 ? sampler_slot(g, unit) : -1;
+			if (slot < 0 || (slot_is_cube(g, slot) != 0) != want_cube) continue;
+			uint32_t then = nid(s), merge = nid(s);
+			uint32_t hit = result2(s, &s->func, SpvOpIEqual, t_bool(s), idx, c_uint(s, (uint32_t)k));
+			INS(&s->func, SpvOpSelectionMerge, merge, 0);
+			INS(&s->func, SpvOpBranchConditional, hit, then, merge);
+			INS(&s->func, SpvOpLabel, then);
+			emit_smp_at(g, op, unit, slot, ok);
+			INS(&s->func, SpvOpBranch, merge); INS(&s->func, SpvOpLabel, merge);
+			any = 1;
+		}
+		if (!any) { if (!g->why[0]) snprintf(g->why, sizeof g->why, "SMP: no sampler for the texture buffer index in bank %d num %d", op->s1.bank, op->s1.num); *ok = 0; }
+		return;
+	}
 	int unit = resolve_smp_unit(op, sa_tex_unit), slot = unit < 0 ? -1 : sampler_slot(g, unit);
-	if (slot < 0) { if (!g->why[0]) snprintf(g->why, sizeof g->why, "SMP: texture unit %d has no sampler slot", unit); *ok = 0; return; }   /* samplers are pre-declared from a prescan before the walk starts */
+	emit_smp_at(g, op, unit, slot, ok);
+}
+static void emit_smp_at(Gen *g, const UOp *op, int unit, int slot, int *ok) {
+	Spv *s = &g->s;
+	if (slot < 0) { if (!g->why[0]) snprintf(g->why, sizeof g->why, "SMP: texture unit %d has no sampler slot (s1 bank %d num %d, %d samplers)", unit, op->s1.bank, op->s1.num, g->nsmp); *ok = 0; return; }   /* samplers are pre-declared from a prescan before the walk starts */
 	uint32_t u = read_comp_f(g, &op->s0, 0, 0, ok), v = read_comp_f(g, &op->s0, 0, 1, ok);
 	if (!*ok) return;
 	uint32_t coord, grad[2] = {0, 0};
@@ -1212,7 +1316,7 @@ static int ldst_pointer_sa(const UOp *code, int i) {
 	if (op->s0.bank != BK_PA && op->s0.bank != BK_TEMP && op->s0.bank != BK_O) return -1;   /* (an output register as scratch: Killzone's skinned meshes form the bone pointer in o0-o2) */
 	for (int j = i - 1; j >= 0; j--) {   /* the latest writer of the base register */
 		const UOp *w = &code[j];
-		if (w->op == OP_NOP || w->op == OP_SMLSI || w->op == OP_SMBO || w->op == OP_BR || w->op == OP_KILL) continue;
+		if (w->op == OP_RET || w->op == OP_NOP || w->op == OP_SMLSI || w->op == OP_SMBO || w->op == OP_BR || w->op == OP_KILL) continue;
 		if (!writes_word(w, op->s0.bank, op->s0.num)) continue;
 		if (w->op == OP_I32MAD && w->sub2 == 2 && w->s2.bank == BK_SA) return w->s2.num;   /* a full-width addend from SA: the pointer */
 		if (w->op == OP_I32MAD2 && !w->sub2 && w->s2.bank == BK_SA && !(w->s2.negabs & 1)) return w->s2.num;   /* I32MAD2's addend is always whole (Killzone's quarter-res pass: (960y + x) * 32 + SA11) */
@@ -1560,6 +1664,7 @@ static void emit_sample_nondep(Gen *g, const UsseIter *it, const uint32_t sa_tex
  * barycentric blend). Packing follows usse_pack_iter: F16 or F32 per the iterator's format. */
 static void emit_frag_prologue(Gen *g, const uint32_t sa_tex_unit[256], int *ok) {
 	const UsseFragLayout *fl = g->fl; if (!fl || (!g->vl && !canon_vary)) { if (!g->why[0]) snprintf(g->why, sizeof g->why, "no %s layout", fl ? "vertex" : "fragment"); *ok = 0; return; }
+	if (getenv("RECOMP_ITER_LOG")) for (int i = 0; i < fl->niters; i++) { const UsseIter *it = &fl->iters[i]; fprintf(stderr, "iter %d: pa %d tex %d unit %d slot %d src %d proj %d sem %d comps %d stor %d fmt %d pc %d\n", i, it->pa, it->is_tex, it->tex_unit, it->tex_unit >= 0 && it->tex_unit < 16 ? sampler_slot(g, it->tex_unit) : -1, it->tex_coord_src, it->tex_proj, it->semantic, it->comps, it->storage, it->result_fmt, it->point_coord); }
 	for (int i = 0; i < fl->niters && *ok; i++) {
 		const UsseIter *it = &fl->iters[i];
 		if (it->is_tex) { emit_sample_nondep(g, it, sa_tex_unit, ok); continue; }
@@ -2009,6 +2114,11 @@ SpirvModule usse_spirv_translate(const UsseProgram *prog, const UsseVertexLayout
 		if (code[i].op == OP_SMP) {
 			int unit = resolve_smp_unit(&code[i], sa_tex_unit);
 			if (unit >= 0 && sampler_slot(&g, unit) < 0 && g.nsmp < 16) g.smp_units[g.nsmp++] = unit;
+			if (code[i].s1.bank != BK_IMM && code[i].s1.bank != BK_SA) for (int k = 0; k < 16; k++) {
+				int u = (int)(sa_tex_unit[128 + k] & 0xFF), j = 128 + k;
+				sa_read[j >> 5] |= 1u << (j & 31);
+				if (u < 16 && sampler_slot(&g, u) < 0 && g.nsmp < 16) g.smp_units[g.nsmp++] = u;
+			}
 		}
 		if (code[i].op == OP_LDST && !code[i].sub2) {   /* a load: which SA word its address comes from (a fragment program's: a render target, emit_ldst_target) */
 			int sa = ldst_pointer_sa(code, i), k;
@@ -2153,7 +2263,7 @@ SpirvModule usse_spirv_translate(const UsseProgram *prog, const UsseVertexLayout
 	}
 	if (!g.is_fragment) {
 		g.var_pos = global_var(s, t_ptr(s, SpvStorageOutput, t_v4), SpvStorageOutput, 0);
-		INS(&s->decos, SpvOpDecorate, g.var_pos, SpvDecorationBuiltIn, SpvBuiltInPosition);
+		INS(&s->decos, SpvOpDecorate, g.var_pos, SpvDecorationBuiltIn, SpvBuiltInPosition); INS(&s->decos, SpvOpDecorate, g.var_pos, 18 /*Invariant*/);   /* a depth pre-pass and its colour pass are different programs over the same geometry: the same depth, as on the Vita */
 		if (g.motion) {   /* the two clip positions (usse_spirv_set_motion) */
 			g.var_mv_cur = global_var(s, t_ptr(s, SpvStorageOutput, t_v4), SpvStorageOutput, 0);
 			INS(&s->decos, SpvOpDecorate, g.var_mv_cur, SpvDecorationLocation, 30);
@@ -2265,8 +2375,75 @@ SpirvModule usse_spirv_translate(const UsseProgram *prog, const UsseVertexLayout
 			}
 		}
 		struct { int end; uint32_t merge; } brstack[8]; int nbr = 0;
+		/* Branches the structured forms below can't express (unconditional, backward, overlapping): the whole program as a
+		 * dispatch loop, as usse.c's run_program walks it -- loop { switch (pc) { case <block>: ...; pc = next; continue; } }.
+		 * Registers live in Private variables, so nothing crosses a block but through them */
+		int dispatch = 0; static _Thread_local uint8_t dleader[4097]; static _Thread_local uint32_t dlabel[4097];
+		uint32_t dlink = 0, dpc = 0, dcont = 0, dloop = 0, dhead = 0, dbody = 0, dswm = 0, ddef = 0; int dopen = 0;
+		{	int ends[8], ne = 0;
+			for (int i = 0; i < n; i++) {
+				while (ne && ends[ne - 1] <= i) ne--;
+				if (code[i].op == OP_RET && i < n - 1) dispatch = 1;   /* (a return that isn't the program's last instruction) */
+				if (code[i].op != OP_BR) continue;
+				int t = i + (int)code[i].imm;
+				if (code[i].pred_kind == 0 || code[i].imm <= 0 || code[i].args[0] || t > n || (ne && t > ends[ne - 1]) || ne >= 8) dispatch = 1; else ends[ne++] = t;
+			}
+		}
+		if (dispatch && n >= 4096) { snprintf(m.err, sizeof m.err, "program of %d instructions too long to dispatch", n); ok = 0; dispatch = 0; }
+		if (dispatch) {
+			memset(dleader, 0, (size_t)n + 1); dleader[0] = 1;
+			{ int en = usse_entry(code, n); if (en < n) dleader[en] = 1; }
+			for (int i = 0; i < n; i++) if (code[i].op == OP_RET && i + 1 < n) dleader[i + 1] = 1;
+			for (int i = 0; i < n; i++) if (code[i].op == OP_BR) {
+				int t = i + (int)code[i].imm;
+				if (t < 0) { snprintf(m.err, sizeof m.err, "branch at instruction %d outside the program", i); ok = 0; break; }
+				if (t < n) dleader[t] = 1;   /* (past the end: the program ends, as run_program; the link flag it ignores too) */
+				dleader[i + 1] = 1;
+			}
+			if (ok) {
+				dpc = global_var(s, t_ptr(s, SpvStoragePrivate, t_uint(s)), SpvStoragePrivate, 0);
+				uint32_t dguard = global_var(s, t_ptr(s, SpvStoragePrivate, t_uint(s)), SpvStoragePrivate, 0);
+				store(s, dguard, c_uint(s, 0));
+				dcont = nid(s); dloop = nid(s); dhead = nid(s); dbody = nid(s); dswm = nid(s); ddef = nid(s);
+				store(s, dpc, c_uint(s, (uint32_t)usse_entry(code, n)));
+				dlink = global_var(s, t_ptr(s, SpvStoragePrivate, t_uint(s)), SpvStoragePrivate, 0);
+				store(s, dlink, c_uint(s, (uint32_t)n));   /* a return with no call under way: the program ends */
+				INS(&s->func, SpvOpBranch, dhead); INS(&s->func, SpvOpLabel, dhead);
+				INS(&s->func, 246 /*OpLoopMerge*/, dloop, dcont, 0);
+				INS(&s->func, SpvOpBranch, dbody); INS(&s->func, SpvOpLabel, dbody);
+				uint32_t sel = load(s, t_uint(s), dpc);
+				uint32_t dg = uop2(s, SpvOpIAdd, load(s, t_uint(s), dguard), c_uint(s, 1)); store(s, dguard, dg);
+				sel = result3(s, &s->func, SpvOpSelect, t_uint(s), result2(s, &s->func, SpvOpUGreaterThan, t_bool(s), dg, c_uint(s, 2048)), c_uint(s, (uint32_t)n), sel);
+				INS(&s->func, SpvOpSelectionMerge, dswm, 0);
+				static _Thread_local uint32_t sw[2 + 2 * 4097]; int nw = 0; sw[nw++] = sel; sw[nw++] = ddef;
+				for (int i = 0; i < n; i++) if (dleader[i]) { dlabel[i] = nid(s); sw[nw++] = (uint32_t)i; sw[nw++] = dlabel[i]; }
+				ins(&s->func, 251 /*OpSwitch*/, nw, sw);
+			}
+		}
 		for (int i = 0; i < n && ok; i++) {
 			const UOp *op = &code[i];
+			if (dispatch && dleader[i]) {
+				if (dopen) { store(s, dpc, c_uint(s, (uint32_t)i)); INS(&s->func, SpvOpBranch, dcont); }
+				INS(&s->func, SpvOpLabel, dlabel[i]); dopen = 1;
+			}
+			if (dispatch && op->op == OP_RET) { store(s, dpc, load(s, t_uint(s), dlink)); store(s, dlink, c_uint(s, (uint32_t)n)); INS(&s->func, SpvOpBranch, dcont); dopen = 0; continue; }
+			if (dispatch && op->op == OP_BR) {
+				int t = i + (int)op->imm;
+				if (t > n) t = n;
+				if (op->args[0]) {   /* save_link: a call */
+					uint32_t lv = c_uint(s, (uint32_t)(i + 1));
+					if (op->pred_kind != 0) { uint32_t p = load(s, t_bool(s), pred_ptr(&g, op->pred_reg)); uint32_t tk = op->pred_kind == 1 ? p : result1(s, &s->func, SpvOpLogicalNot, t_bool(s), p); lv = result3(s, &s->func, SpvOpSelect, t_uint(s), tk, lv, load(s, t_uint(s), dlink)); }
+					store(s, dlink, lv);
+				}
+				if (op->pred_kind == 0) store(s, dpc, c_uint(s, (uint32_t)t));
+				else {
+					uint32_t p = load(s, t_bool(s), pred_ptr(&g, op->pred_reg));
+					uint32_t taken = op->pred_kind == 1 ? p : result1(s, &s->func, SpvOpLogicalNot, t_bool(s), p);
+					store(s, dpc, result3(s, &s->func, SpvOpSelect, t_uint(s), taken, c_uint(s, (uint32_t)t), c_uint(s, (uint32_t)(i + 1))));
+				}
+				INS(&s->func, SpvOpBranch, dcont); dopen = 0;
+				continue;
+			}
 			while (nbr && brstack[nbr - 1].end <= i) { INS(&s->func, SpvOpBranch, brstack[nbr - 1].merge); INS(&s->func, SpvOpLabel, brstack[nbr - 1].merge); nbr--; }
 			if (op->op == OP_BR) {
 				int target = i + (int)op->imm;
@@ -2298,7 +2475,7 @@ SpirvModule usse_spirv_translate(const UsseProgram *prog, const UsseVertexLayout
 				INS(&s->func, SpvOpLabel, then);
 			} else if (op->pred_kind != 0 && op->op != OP_NOP) { snprintf(m.err, sizeof m.err, "predicated %s at instruction %d", op->op == OP_KILL ? "KILL" : "branch", i); ok = 0; break; }
 			switch (op->op) {
-			case OP_NOP: break;
+			case OP_NOP: case OP_RET: break;   /* (a program-ending return, without a dispatch loop) */
 			case OP_SMLSI:   /* ports usse.c's run_program SMLSI handling, at translate time (see slot_off) */
 				for (int sl = 0; sl < 4; sl++) {
 					int v = op->args[sl], inc = (int8_t)(v & 0xFF), mode2 = (v >> 8) & 1;
@@ -2318,6 +2495,9 @@ SpirvModule usse_spirv_translate(const UsseProgram *prog, const UsseVertexLayout
 			case OP_VTST: emit_vtst(&g, op, &ok); break;
 			case OP_VTSTMSK: emit_vtstmsk(&g, op, &ok); break;
 			case OP_VBW: emit_vbw(&g, op, &ok); break;
+			case OP_SOP2: emit_sop2(&g, op, &ok); break;
+			case OP_SOP2M: emit_sop2m(&g, op, &ok); break;
+			case OP_SOP3: emit_sop3(&g, op, &ok); break;
 			case OP_I8MAD: emit_i8mad(&g, op, &ok); break;
 			case OP_I16MAD: emit_i16mad(&g, op, &ok); break;
 			case OP_I32MAD: emit_i32mad(&g, op, &ok); break;
@@ -2336,6 +2516,13 @@ SpirvModule usse_spirv_translate(const UsseProgram *prog, const UsseVertexLayout
 				int vmode = pr && pr[0] >= 'A' && pr[0] <= 'Z', bl = pr ? (pr[0] | 0x20) : 0;
 				if (ok && at && atoi(at + 1) == i && vmode == !g.is_fragment) { RegPtr rp = bank_ptr(&g, bl == 't' ? BK_TEMP : bl == 'p' ? BK_PA : BK_O, atoi(pr + 2)); if (rp.ok) g.probe_id = load(&g.s, t_uint(&g.s), rp.ptr); }
 			}
+		}
+		if (dispatch && ok) {
+			if (dopen) { store(s, dpc, c_uint(s, (uint32_t)n)); INS(&s->func, SpvOpBranch, dcont); }
+			INS(&s->func, SpvOpLabel, ddef); INS(&s->func, SpvOpBranch, dloop);
+			INS(&s->func, SpvOpLabel, dswm); INS(&s->func, SpvOpBranch, dcont);
+			INS(&s->func, SpvOpLabel, dcont); INS(&s->func, SpvOpBranch, dhead);
+			INS(&s->func, SpvOpLabel, dloop);
 		}
 		while (ok && nbr) { INS(&s->func, SpvOpBranch, brstack[nbr - 1].merge); INS(&s->func, SpvOpLabel, brstack[nbr - 1].merge); nbr--; }   /* ranges ending at the program's end */
 		if (ok) { if (g.is_fragment) emit_frag_epilogue(&g, &ok); else emit_vert_epilogue(&g, &ok); }
